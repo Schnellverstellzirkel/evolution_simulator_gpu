@@ -173,15 +173,16 @@ impl Experiment {
             .collect();
         timings[2] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        // Every creature also competes in its own island's archive, and a
-        // new body plan that does not take a behavior cell may enter the
-        // island's morphology reserve. Each island's offers resolve in block
-        // order and the islands are independent, so the streams run in
-        // parallel.
+        // Every creature is offered to the archive it breeds for. A child with
+        // a new body plan that takes no cell may enter the morphology reserve
+        // of that archive. The archives are independent and each takes its
+        // offers in block order, so they run in parallel.
         let generation = self.generation;
-        // Per island: the positions that entered, the emitter and offer of
-        // each reserve entry, the positions that entered the reserve, and
-        // the new body plans that took neither a cell nor a reserve place.
+        /// What one archive took from the block: the positions that entered a
+        /// cell or the reserve, the emitter index and offer of each reserve
+        /// entry, the positions that entered the reserve, and the positions of
+        /// the new body plans of an island that took neither a cell nor a
+        /// reserve place.
         type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>, Vec<usize>, Vec<usize>);
         // Each archive's creatures, in block order.
         let mut members: Vec<Vec<usize>> = vec![Vec::new(); self.islands.len()];
@@ -200,10 +201,14 @@ impl Experiment {
                 let mut reserve_offers = Vec::new();
                 let mut reserve_entered = Vec::new();
                 let mut routed = Vec::new();
-                // Reserve admission needs a score above the island's best
-                // behavior elite and reserve entry of the same body plan, or
-                // above the reserve's floor once it is full
-                // (`QdArchive::offer_morphology` makes the final check).
+                // `parents` maps the id of each elite to its body plan key and
+                // whether it is a reserve entry. `bars` maps a body plan key to
+                // the best fitness of its behavior elites and of its reserve
+                // entry, with negative infinity for none. A reserve place needs
+                // a score above both bars of the plan. A plan with no reserve
+                // entry also needs a score above the reserve's floor once the
+                // reserve is full. `QdArchive::offer_morphology` makes the final
+                // check.
                 let size = archive.entries.len();
                 let mut parents: KeyMap<(u64, bool)> =
                     KeyMap::with_capacity_and_hasher(size, Default::default());
@@ -249,8 +254,10 @@ impl Experiment {
                     if !p.structural {
                         continue;
                     }
-                    // A reserve place goes to a new body plan, or to a better
-                    // child of a reserve entry with the same plan.
+                    // A reserve place goes to a child whose body plan differs
+                    // from its parent's, or to a child of a reserve entry of the
+                    // same plan. The parent has to be an elite of this archive
+                    // from before the block.
                     let parent = births[j].parent_id.and_then(|id| parents.get(&id));
                     let changed = parent.is_some_and(|&(plan, _)| plan != p.plan);
                     let from_reserve =
@@ -269,7 +276,9 @@ impl Experiment {
                         None => floor.is_none_or(|floor| p.score > floor),
                     };
                     // A new body plan that an island turns away goes to the
-                    // island's nursery of reshaped bodies.
+                    // island's nursery of reshaped bodies. Here `island` is the
+                    // archive's index in `Experiment::islands`, which lists the
+                    // nurseries after the islands. A nursery turns nothing away.
                     let routes = changed && island < island_count();
                     if !admits {
                         if routes {
@@ -334,6 +343,7 @@ impl Experiment {
                     .collect()
             })
             .collect();
+        // Per archive, whether it took an entry from this block.
         let mut island_changed: Vec<bool> = island_results
             .iter()
             .map(|(group, _, _, _)| !group.is_empty())
@@ -341,7 +351,8 @@ impl Experiment {
         for (island, entered) in routed_entered.iter().enumerate() {
             island_changed[reshaped_of(island)] |= !entered.is_empty();
         }
-        // A wild migrant that took a hub cell counts for its wild island.
+        // A wild migrant that entered the hub's archive counts as a win for
+        // its wild island.
         if !self.wild_exports.is_empty()
             && let Some((group, _, _, _)) = island_results.get(hub_island())
         {
@@ -355,8 +366,9 @@ impl Experiment {
                 }
             }
         }
-        // The first elite of a new body plan in a main island joins the
-        // founder bank.
+        // The first elite of a body plan that has not entered a main island
+        // before joins the founder bank. The oldest founder leaves when the
+        // bank is full.
         {
             for (group, _, _, _) in island_results.iter().take(qd::MAIN_ISLANDS) {
                 for &j in group {
@@ -381,13 +393,15 @@ impl Experiment {
                 for &j in &group {
                     kinds[j] |= kind;
                 }
+                // A reserve entry carries the reserve mark in place of the
+                // island or nursery mark.
                 for &j in &reserves {
                     kinds[j] = (kinds[j] & !kind) | dump::RESERVE;
                 }
             }
             entered.extend(group);
-            // Nursery entries count for no emitter: the emitter statistics
-            // describe the islands' search.
+            // The reserve entries of a nursery count for no emitter. The
+            // emitter statistics describe the islands' search.
             if arena < island_count() {
                 reserve_offers.extend(offers);
             }
@@ -402,11 +416,12 @@ impl Experiment {
         }
         timings[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        // The scores depend only on the archive's elites, so an island that
-        // took no offer keeps the ones it has. A reshaped nursery takes
-        // offers in every block, so it refreshes once a generation instead
-        // (`end_generation`). Most archives are small, so they refresh side
-        // by side rather than one after another.
+        // The behavior scores depend only on an archive's elites. An archive
+        // that took no entry keeps its scores, unless they do not cover its
+        // elites. A nursery of reshaped bodies takes entries in every block,
+        // so it refreshes once a generation instead (`end_generation`). Most
+        // archives are small, so they refresh side by side rather than one
+        // after another.
         let refreshed = reshaped_of(0).min(self.islands.len());
         self.islands[..refreshed]
             .par_iter_mut()
