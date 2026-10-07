@@ -69,14 +69,14 @@ pub fn band(painter: &Painter, line: &[Pos2], depth: f32, top: Color32, bottom: 
 }
 
 /// Overlays on the sky, drawn over the backdrop and before the ground: a warm
-/// glow in a heat wave, haze in thick air, wind streaks, and a tint for how
-/// far up the autochange ladder the world has climbed. `time` is the replay
-/// clock in seconds.
+/// glow in a heat wave, haze when the air thickens, wind streaks, and a tint
+/// for how far up the autochange ladder the world has climbed. `time` is the
+/// replay clock in seconds.
 pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
     let heat = amount(cfg, "Heat wave");
     if heat > 0.0 {
-        // A warm glow rising from the horizon, so the sky keeps its blue
-        // overhead instead of turning grey.
+        // A warm glow that grows toward the bottom of the view and fades out
+        // toward the top, so the high sky stays as it is.
         let mut mesh = Mesh::default();
         let glow = alpha((226, 150, 64), 0.18 + 0.30 * heat);
         for (pos, color) in [
@@ -115,7 +115,8 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
         }
     }
     if cfg.autochange > 0 {
-        // Tint by how far up the autochange ladder the world has climbed.
+        // Tint by how far up the autochange ladder the world has climbed, in
+        // four stages.
         let lap = crate::environment::autochange_ladder().len().max(4);
         let quarter = (usize::from(cfg.autochange_step).min(lap - 1)) * 4 / lap;
         let tint = [
