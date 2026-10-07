@@ -1110,21 +1110,28 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
     })
 }
 
+/// Rayon threads for a machine with `logical` logical CPUs: half of them, at
+/// least 1 and at most 8.
 fn worker_budget(logical: usize) -> usize {
     (logical / 2).clamp(1, 8)
 }
 
+/// The Rayon thread count when `requested` threads were asked for
+/// (`RAYON_NUM_THREADS`). No request, or a request of 0, takes the budget.
+/// A larger request is cut down to the budget.
 fn rayon_thread_count(logical: usize, requested: Option<usize>) -> usize {
     let budget = worker_budget(logical);
     requested.filter(|&n| n > 0).unwrap_or(budget).min(budget)
 }
 
+/// Logical CPUs of the machine, or 2 when the system does not say.
 fn logical_cpus() -> usize {
     std::thread::available_parallelism().map_or(2, usize::from)
 }
 
-/// General worker count (archive insertion, breeding, packing): half the
-/// logical CPUs, at most eight. `RAYON_NUM_THREADS` can reduce it.
+/// Rayon thread count for the example tools: half the logical CPUs, at most
+/// eight. `RAYON_NUM_THREADS` can reduce it. The game sizes its own pool with
+/// `threads::pool_threads`.
 pub fn rayon_threads() -> usize {
     rayon_thread_count(
         logical_cpus(),
@@ -1134,7 +1141,10 @@ pub fn rayon_threads() -> usize {
     )
 }
 
-/// Best-effort worker priority reduction so evaluation yields to the desktop.
+/// Lowers the priority of the calling thread so that evaluation yields to the
+/// desktop. It is best effort and ignores errors. On Linux the thread gets
+/// nice 10, and on Windows the lowest thread priority. Other systems do
+/// nothing.
 pub fn lower_thread_priority() {
     #[cfg(target_os = "linux")]
     // Linux applies nice to the calling thread when the id is zero.
@@ -1162,6 +1172,9 @@ pub fn lower_thread_priority() {
 mod tests {
     use super::*;
 
+    /// A `ThreadedEngine` with no engine thread behind it. The test reads the
+    /// jobs the engine sends from `jobs` and plays the thread by sending
+    /// results or errors through `done`.
     struct WorkerFixture {
         engine: ThreadedEngine,
         jobs: mpsc::Receiver<(u64, Arc<Population>, Config)>,
@@ -1199,6 +1212,7 @@ mod tests {
         }
     }
 
+    /// A finished unit with one result, whose fitness is `ticket + 0.5`.
     fn finished(ticket: u64) -> Finished {
         Finished {
             ticket,
@@ -1403,15 +1417,17 @@ mod tests {
 
     /// The batches of each submission.
     type Layout = Vec<creature_kernel::LaneBatch>;
-    /// Node stride and trial length of a recording.
+    /// Slots per frame and trial length of a recording.
     type Stretch = (usize, u32);
 
-    /// A device that runs every unit at once and can fail submissions for
-    /// lack of memory, following `script` (true fails; missing entries succeed).
+    /// A device that finishes its submissions in order, one at each `poll`.
+    /// `script` says which submissions fail for lack of memory: `true` fails
+    /// and a missing entry succeeds.
     struct FakeDevice {
         slots: usize,
         script: VecDeque<bool>,
-        /// Submissions in order, with (node stride, trial length) for a recording.
+        /// Submissions in order, with (slots per frame, trial length) for a
+        /// recording.
         in_flight: VecDeque<(u64, Layout, Option<Stretch>)>,
         next: u64,
         released: Arc<AtomicU64>,
