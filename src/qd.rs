@@ -1,31 +1,29 @@
+//! The state of the MAP-Elites search: behavior descriptors, archives of
+//! elites and the emitters that breed from them.
+//! An archive keeps the fastest creature of each cell, where a cell is a way
+//! of moving times a body class, and a reserve of new body plans.
+//! The module also holds the CMA-ES samplers, the layout of ring slots over
+//! islands and nurseries, and the save version `VERSION`.
+//! `storage::Experiment` owns the archives and `evolution` breeds from them.
 use crate::evolution::{Creature, Muscle, Population, Rng, StoredCreature};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// 61: a node inside the ground is moved out as a position change with no
-//     velocity and no normal impulse (it was a velocity goal, which gave
-//     bodies energy and friction grip at one substep). Scores of older saves
-//     came from the old contact.
-// 62: the wild islands and their reshaped nurseries keep one elite per way of
-//     moving and never refine (memory). Saves of 61 and older load as they are.
-// 63: every entrant above half its archive's best gets its fine trial and
-//     enters with the lower score. Older saves hold standard-trial scores that
-//     no replay reaches.
-// 64: a new kernel: one thread per creature, position-based dynamics with 8
-//     substeps per step, hard joint limits and ground contacts that add no
-//     energy. Scores of older saves came from the old physics.
+/// Number of emitter kinds (`Emitter`).
 pub const EMITTER_COUNT: usize = 4;
-/// The movement grid: ground contact, gait cadence, mean body height and
-/// feet (distinct nodes that touched the ground).
+/// The bins of the movement grid: ground contact, gait cadence, mean body
+/// height and feet (nodes that touched the ground and lifted off again).
 const MOVEMENT_BINS: [u8; 4] = [6, 8, 6, 5];
 /// The axes of measured and shape behavior, which local competition and
 /// novelty compare across neighboring cells. The node-count class is the
 /// last byte of a niche and only separates bodies: neighbors share it.
 const NEIGHBOR_AXES: usize = 5;
 /// Generations an island keeps one elite per way of moving before its
-/// archive is refined to the cells of its body classes. Refined from the
-/// first generation, the islands climbed 17% slower at generation 40; refined
-/// at generation 40 they climbed as fast as an archive that never was.
+/// archive is refined to the cells of its body classes. Each isolated island
+/// waits 10 generations longer than the one before it, and a wild island is
+/// never refined (`Experiment::refine_archives`). Refined from the first
+/// generation, the islands climbed 17% slower at generation 40. Refined at
+/// generation 30 or 40, they climbed as fast as an archive that stayed coarse.
 pub const REFINE_AFTER: u32 = 30;
 /// Names of the body shape classes, most compact first, and of the body size
 /// classes, smallest first, for every count of classes.
@@ -50,9 +48,14 @@ const SIZE_NAME_SETS: [&[&str]; 6] = [
 /// classes (node count), and their names.
 #[derive(Clone, Copy, Debug)]
 pub struct Classes {
+    /// Where each shape class after the first starts, as the start pose's
+    /// width over its height.
     aspect: &'static [f32],
+    /// Where each size class after the first starts, as a node count.
     nodes: &'static [u16],
+    /// Names of the shape classes, most compact first.
     pub shape_names: &'static [&'static str],
+    /// Names of the size classes, smallest first.
     pub size_names: &'static [&'static str],
 }
 const ISLAND_ASPECT: [f32; 2] = [1.2, 2.0];
@@ -117,8 +120,8 @@ impl Classes {
             (None, None) => "Every size".to_owned(),
         }
     }
-    /// The cells of a body of this start-pose aspect and node count, as
-    /// the shape class and the size class.
+    /// The shape class and the size class of a body with this start-pose
+    /// aspect and node count.
     fn classes_of(&self, aspect: f32, nodes: u16) -> (u8, u8) {
         (
             self.aspect.iter().filter(|&&edge| aspect >= edge).count() as u8,
@@ -142,8 +145,13 @@ pub(crate) const MOVEMENT_CELLS: usize = (MOVEMENT_BINS[0] as usize)
     * (MOVEMENT_BINS[1] as usize)
     * (MOVEMENT_BINS[2] as usize)
     * (MOVEMENT_BINS[3] as usize);
+/// Most entries the morphology reserve of an archive holds.
 pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
+/// Most cells a generation's statistics may report. `Experiment::validate`
+/// checks a loaded history against it.
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
+/// Most CMA emitters and optimizers the experiment keeps. When it is full, a
+/// new one replaces the one used longest ago.
 pub(crate) const CMA_LIMIT: usize = 96;
 // 26: a fall ends the trial; behavior totals stop at the fall and average
 // over the steps walked.
@@ -197,6 +205,27 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
 //     a save is compressed with long-range matching. A save of version 56
 //     loads by moving each elite to its cell in the new layout.
+// 58: 100 wild islands beside the isolated islands and the hub, each in a
+//     world of its own. The save holds their archives.
+// 59: the statistics of a generation gained the body plans, the effective
+//     clades and the median plan age.
+// 60: muscles are twice as strong (force cap 200 N, 200 m/s^2). Scores of
+//     older saves came from weaker muscles.
+// 61: a node inside the ground is moved out as a position change with no
+//     velocity and no normal impulse (it was a velocity goal, which gave
+//     bodies energy and friction grip at one substep). Scores of older saves
+//     came from the old contact.
+// 62: the wild islands and their reshaped nurseries keep one elite per way of
+//     moving and never refine (memory). Saves of 61 and older load as they are.
+// 63: every entrant above half its archive's best gets its fine trial and
+//     enters with the lower score. Older saves hold standard-trial scores that
+//     no replay reaches.
+// 64: a new kernel: one thread per creature, position-based dynamics with
+//     small substeps, hard joint limits and ground contacts that add no
+//     energy. Scores of older saves came from the old physics.
+/// The version of the archives and of the physics that scored them. A save of
+/// another version is turned down at load unless `loadable` accepts it. Bump
+/// it when archive or physics semantics change.
 pub const VERSION: u32 = 64;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
@@ -205,21 +234,21 @@ pub const OLDEST_LOADABLE: u32 = 53;
 pub fn loadable(version: u32) -> bool {
     (OLDEST_LOADABLE..=VERSION).contains(&version)
 }
+/// Neighbors that novelty and local competition compare an elite with.
 const LOCAL_NEIGHBORS: usize = 5;
 /// Elites the novelty emitter weighs: the ones visited least.
 const LEAST_VISITED: usize = 32;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
-/// First byte of an optimizer's niche; behavior niches never reach it and
+/// First byte of an optimizer's niche. Behavior niches never reach it and
 /// morphology niches use 255.
 const OPTIMIZER_NICHE_MARKER: u8 = 254;
-/// The niche key of an island's optimizers for one gait cadence band;
-/// together with the body plan it identifies one optimizer.
 /// The main islands: the isolated islands and the hub. They run in the
 /// player's world.
 pub const MAIN_ISLANDS: usize = 5;
-/// Wild islands after the main ones. Each runs in its own fixed world, a
-/// random mix of environment effects drawn from the seed
-/// (`environment::wild_world`), and sends copies of its best to the hub.
+/// Wild islands after the main ones. Each runs in a world of its own, a fixed
+/// mix of one to three environment effects that is the same in every game
+/// (`environment::wild_levels`, `environment::wild_world`), and sends copies
+/// of its best to the hub.
 pub const WILD_ISLANDS: usize = 100;
 /// Of every `SLOT_LANES` slots, `MAIN_LANES` go to the main islands in turn
 /// and the rest to the wild islands in turn.
@@ -271,8 +300,11 @@ pub const NURSERY_FRESH_SHARE: f32 = 0.5;
 /// children that took no cell).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arena {
+    /// The island's own archive.
     Island,
+    /// The island's nursery of new random bodies.
     Nursery,
+    /// The island's nursery of reshaped bodies.
     Reshaped,
 }
 /// How many kinds of archive each island has.
@@ -309,7 +341,8 @@ pub fn arena_of_slot(slot: usize, arenas: usize) -> usize {
 pub fn is_reshaped_arena(arena: usize, arenas: usize) -> bool {
     arenas >= ARENA_KINDS && arena >= 2 * (arenas / ARENA_KINDS)
 }
-/// The niche key of island `island`'s optimizer for cadence band `cadence`.
+/// The niche key of island `island`'s optimizers for gait cadence band
+/// `cadence`. Together with the body plan it identifies one optimizer.
 pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
     let b = (island as u32).to_le_bytes();
     Niche([OPTIMIZER_NICHE_MARKER, b[0], b[1], b[2], b[3], cadence])
@@ -317,8 +350,12 @@ pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
 /// Generations a new body plan is protected against a challenger of another
 /// plan.
 pub const PROTECTION_GENERATIONS: u32 = 3;
-/// Developer switch for measuring the biodiversity ideas one at a time
-/// (temporary).
+/// Developer diagnostic. Whether bit `bit` is set in the number in the
+/// `BIO_OFF` environment variable, which is read once and counts as 0 when it
+/// is unset or not a number. A set bit turns one biodiversity idea off, so a
+/// run can measure the ideas one at a time: 16 is the grace of graduates, 32
+/// the mating share of the reshaped nurseries, 64 the second optimizer target
+/// and 128 the stepping stones between islands. The switch is temporary.
 pub fn bio_off(bit: u32) -> bool {
     static OFF: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| {
@@ -332,14 +369,20 @@ pub fn bio_off(bit: u32) -> bool {
 /// How much a parent of a rare clade is preferred among the parents a
 /// tournament of a refined island compares (`Experiment::clade_rarity_of`).
 pub const RARITY_WEIGHT: f32 = 1.0;
+/// Times a reserve entry must have been a parent before a new body plan may
+/// replace it in a full reserve.
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
+/// Share of the structural emitter's children whose parent comes from the
+/// island's morphology reserve.
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
-// Random bodies only seed an empty archive: against evolved elites they
-// almost never enter it (0.03-0.06% of attempts in fixed-seed tests).
-// Structural children are 62.5%, and 18% of the novelty children also get a
-// structural operator, so two thirds of the bred children (60% of a
-// generation, after the 10% of fresh random bodies) carry a structural
-// mutation and a third only change numbers (owner, 2026-10-03).
+/// The share of each emitter before any attempts, in `Emitter::ALL` order.
+/// `emitter_weights` scales it afterwards. Random bodies only seed an empty
+/// archive: against evolved elites they almost never enter it (0.03-0.06% of
+/// attempts in fixed-seed tests). Structural children are 62.5%, and 18% of
+/// the novelty children also get a structural operator, so two thirds of the
+/// bred children (60% of a generation, after the 10% of fresh random bodies)
+/// carry a structural mutation and a third only change numbers (owner,
+/// 2026-10-03).
 const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.145, 0.625, 0.23, 0.0];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
