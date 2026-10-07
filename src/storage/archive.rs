@@ -130,11 +130,19 @@ impl Experiment {
         // each reserve entry, the positions that entered the reserve, and
         // the new body plans that took neither a cell nor a reserve place.
         type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>, Vec<usize>, Vec<usize>);
+        // Each archive's creatures, in block order.
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); self.islands.len()];
+        for (j, &arena) in arena_of.iter().enumerate() {
+            if let Some(list) = members.get_mut(arena as usize) {
+                list.push(j);
+            }
+        }
         let island_results: Vec<IslandResult> = self
             .islands
             .par_iter_mut()
+            .zip(&members)
             .enumerate()
-            .map(|(island, archive)| {
+            .map(|(island, (archive, members))| {
                 let mut entered = Vec::new();
                 let mut reserve_offers = Vec::new();
                 let mut reserve_entered = Vec::new();
@@ -157,10 +165,8 @@ impl Experiment {
                         bar.0 = bar.0.max(elite.fitness);
                     }
                 }
-                for (j, p) in prep.iter().enumerate() {
-                    if arena_of[j] as usize != island {
-                        continue;
-                    }
+                for &j in members {
+                    let p = &prep[j];
                     if !p.score.is_finite() || p.score <= FAILED || p.screened {
                         continue;
                     }
