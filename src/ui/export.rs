@@ -49,7 +49,7 @@ impl GifCamera {
     /// Fits the zoom and the bottom edge to the lowest and highest node edges
     /// in `frames`, plus a margin. The range always spans at least y = -0.15 m
     /// to 0.4 m, so the flat ground stays in view.
-    fn fit(nodes: &[Node], frames: &[Vec<[f32; 2]>]) -> Self {
+    fn fit<'a>(nodes: &[Node], frames: impl Iterator<Item = &'a Vec<[f32; 2]>>) -> Self {
         let mut min_y = 0.0f32;
         let mut max_y = 0.4f32;
         for frame in frames {
@@ -393,25 +393,24 @@ fn write_creature_gif(
 ) -> anyhow::Result<usize> {
     let nodes = &physics::nodes(creature);
     // The camera fits the frames the GIF shows.
-    let shown: Vec<Vec<[f32; 2]>> = ticks
-        .iter()
-        .filter_map(|&tick| frames.get(tick as usize).cloned())
-        .collect();
-    let camera = GifCamera::fit(nodes, &shown);
+    let camera = GifCamera::fit(
+        nodes,
+        ticks.iter().filter_map(|&tick| frames.get(tick as usize)),
+    );
     let scene = GifScene {
         creature,
         config,
         nodes,
         camera: &camera,
     };
-    let delay = if ticks.len() > 1 {
+    let hundredths = if ticks.len() > 1 {
         let span = ticks[ticks.len() - 1].saturating_sub(ticks[0]) as f32;
         let mean = span / (ticks.len() - 1) as f32;
         ((mean * physics::dt() * 100.0).round() as u32).clamp(2, 200)
     } else {
         10
     };
-    let delay = GifDelay::from_numer_denom_ms(delay * 10, 1);
+    let delay = GifDelay::from_numer_denom_ms(hundredths * 10, 1);
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut encoder = GifEncoder::new_with_speed(file, 30);
     encoder.set_repeat(GifRepeat::Infinite)?;
