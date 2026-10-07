@@ -1,26 +1,46 @@
+//! The lineage of the search, kept in `Experiment::lineage`. Each creature
+//! that enters an archive gets an `Ancestor` record with its parent and the
+//! change that made it. Records are added as blocks are absorbed and pruned
+//! once a generation to the ancestors of the living elites. The lineage tab,
+//! the clade counts and the clade rarity in parent selection read them.
+
 use super::*;
 
-/// How far back the lineage tab reads an elite's ancestors.
+/// How many steps back from an elite its ancestors are read. The lineage tab
+/// shows a chain this long, the clade counts follow parents this far, and
+/// `prune_lineage` and a save keep records no farther back.
 pub const ANCESTRY_DEPTH: usize = 400;
-/// How many of each island's fastest elites keep their ancestors in a save,
-/// besides every elite of the global archive.
+/// How many of each island's fastest elites keep the genes of their
+/// ancestors, besides every elite of the global archive. `prune_lineage` keeps
+/// those genes in memory and a save writes them.
 pub(super) const ISLAND_LEADERS: usize = 10;
 
 /// One recorded creature in an elite's ancestry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ancestor {
+    /// The id of the elite it was bred from, or none when it was not bred
+    /// from one of its archive's elites. The record of the parent may have
+    /// been pruned.
     pub parent: Option<u64>,
+    /// Its genes. `prune_lineage` replaces them with the empty creature in a
+    /// record outside the chains the lineage tab shows.
     pub creature: StoredCreature,
+    /// Its distance when it entered an archive.
     pub fitness: f32,
+    /// The generation it entered an archive in.
     pub generation: u32,
-    /// What changed from the parent, for display.
+    /// How it was made and what changed from its parent, in words for the
+    /// lineage tab. `describe_change` writes it.
     pub change: String,
     /// Its own features at the early rungs (`rungs::profile`), which decide
     /// whether its children skip them.
     pub rung: [u16; 2 * crate::rungs::FEATURES],
 }
 
-/// Short description of how a child differs from its parent.
+/// The words for `Ancestor::change`. They name the `emitter` that bred
+/// `child` and say if it was `crossed`. When the parent is known they add the
+/// nodes, muscles and organs the child gained or lost, and whether its rhythm
+/// became synced. For example "reshaped, +2 nodes, +1 muscle".
 fn describe_change(
     parent: Option<&Creature>,
     child: &Creature,
@@ -71,8 +91,14 @@ fn describe_change(
 
 impl Experiment {
     /// The lineage record of creature `index` of `population`, which just
-    /// entered an archive with `result`; none when it has one already. A
-    /// parent entered an archive in an earlier block, so its record is there.
+    /// entered an archive with `result` and was bred as `birth`. It returns
+    /// the creature's id with the record, or none when the creature already
+    /// has a record. An elite queued again after a world change is such a
+    /// creature. The change text compares the creature with the genes in its
+    /// parent's record. That record is usually there, because the parent
+    /// entered an archive in an earlier block. If it is gone, the text names
+    /// only the emitter and the crossover. If `prune_lineage` stripped its
+    /// genes, every node, muscle and organ of the creature counts as new.
     pub(super) fn ancestor_of(
         &self,
         population: &Population,
@@ -85,6 +111,8 @@ impl Experiment {
             return None;
         }
         let creature = population.creature(index);
+        // The period of the first muscle, a feature of the early rungs, as
+        // `kernel::pack` takes it.
         let period = if genome.muscle_count > 0 {
             population.muscles[genome.muscle_start].period
         } else {
@@ -107,12 +135,13 @@ impl Experiment {
             },
         ))
     }
-    /// Bounds the lineage. A record stays while a living elite is at most
-    /// `ANCESTRY_DEPTH` steps from it, which is as far as the clade count and
-    /// the lineage tab read. Its creature stays only for the elites the tab
-    /// shows and their ancestors (the global archive and each
-    /// island's fastest `ISLAND_LEADERS`); the other records keep their links
-    /// and numbers and lose their genes, as in a save.
+    /// Bounds the lineage once a generation. A record stays while a living
+    /// elite is at most `ANCESTRY_DEPTH` steps from it, which is as far as the
+    /// clade counts and the lineage tab read. A record keeps its creature only
+    /// within that distance of an elite the tab shows. Those are the elites of
+    /// the global archive and the fastest `ISLAND_LEADERS` of each archive in
+    /// `islands`. The other records keep their links and numbers and lose
+    /// their genes. The genes of a living elite stay in its archive.
     pub(super) fn prune_lineage(&mut self) {
         let elites = || {
             self.archive
@@ -127,7 +156,8 @@ impl Experiment {
             fastest.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
             shown.extend(fastest.iter().take(ISLAND_LEADERS).map(|x| x.creature.id));
         }
-        // The ids within `ANCESTRY_DEPTH` steps of `start`, level by level.
+        // Adds to `within` the ids of `start` and of their ancestors up to
+        // `ANCESTRY_DEPTH` steps back, one level of parents at a time.
         let reach = |start: &[u64], within: &mut KeySet| {
             let mut frontier: Vec<u64> = start
                 .iter()
@@ -160,7 +190,9 @@ impl Experiment {
             }
         }
     }
-    /// Ancestor chain of a creature, newest first (at most `limit` steps).
+    /// The records of creature `id` and of its ancestors, newest first. The
+    /// chain stops at a creature with no parent, at the first parent with no
+    /// record, or after `limit` records. It is empty when `id` has no record.
     pub fn ancestry(&self, id: u64, limit: usize) -> Vec<&Ancestor> {
         let mut chain = Vec::new();
         let mut current = Some(id);
@@ -176,10 +208,10 @@ impl Experiment {
         }
         chain
     }
-    /// The ids of a creature's ancestor chain, newest first (at most `limit`
-    /// steps), as `ancestry` walks it. Use these rather than the records'
-    /// `creature.id`: a record outside the chains the lineage tab shows keeps
-    /// no genes (`prune_lineage`), and its stored creature has id 0.
+    /// The ids of the chain that `ancestry` walks for creature `id`, newest
+    /// first, at most `limit` of them. Use these rather than the records'
+    /// `creature.id`. A record outside the chains the lineage tab shows keeps
+    /// no genes after `prune_lineage`, and its stored creature has id 0.
     pub fn ancestry_ids(&self, id: u64, limit: usize) -> Vec<u64> {
         let mut ids = Vec::new();
         let mut current = Some(id);
@@ -195,8 +227,11 @@ impl Experiment {
         }
         ids
     }
-    /// The effective number of clades among `ids`: a clade is the elites
-    /// that share their oldest recorded ancestor.
+    /// The effective number of clades among the elites `ids`, or 0 for no
+    /// ids. A clade is the elites that share their oldest recorded ancestor,
+    /// found by following parents while each one has a record, for at most
+    /// `ANCESTRY_DEPTH` steps. The number is the exponential of the Shannon
+    /// entropy of the clade sizes, the Hill number of order 1.
     pub(super) fn effective_clades(&self, ids: impl Iterator<Item = u64>) -> f32 {
         let mut sizes: HashMap<u64, usize> = HashMap::new();
         let mut n = 0usize;
@@ -223,10 +258,13 @@ impl Experiment {
             .sum();
         entropy.exp() as f32
     }
-    /// For each entry of a refined `archive`, how rare its clade is: 1 minus
-    /// the log of the number of behavior elites in the clade over the log of
-    /// all of them, where a clade is the elites that share the oldest recorded
-    /// ancestor.
+    /// How rare the clade of each entry of `archive` is, in the order of its
+    /// entries. A clade is the elites that share their oldest recorded
+    /// ancestor. An entry scores 1 minus the log of the number of behavior
+    /// elites in its clade over the log of the number in the archive. Entries
+    /// of the morphology reserve get the score of their clade but add nothing
+    /// to its size. The scores are scaled down while few elites are near the
+    /// best distance. The list is empty for an archive that is not refined.
     pub(super) fn clade_rarity_of(&self, archive: &QdArchive) -> Vec<f32> {
         // A climbing archive keeps one elite per way of moving and the best
         // lineage fills it: a bonus for rare clades would take parents from
@@ -263,10 +301,11 @@ impl Experiment {
             }
         }
         let total = (archive.behavior_count() as f32).ln().max(1.0);
-        // While distance still separates the elites a bonus for rare clades
-        // would take parents from the climb. It grows with the share of elites
-        // within 10% of the best, and has its full weight when half of them
-        // are: where the distances are level, rarity decides.
+        // While distance still separates the elites, a bonus for rare clades
+        // would take parents from the climb. So the scores are scaled. The
+        // scale grows with the share of elites within 10% of the best and is
+        // 1 when half of them are. Where the distances are level, rarity
+        // decides.
         let best = archive
             .entries
             .iter()
