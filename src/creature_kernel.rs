@@ -117,63 +117,75 @@ impl GpuResult {
     }
 }
 
-/// What a trial looked like on its way, for the steps ladder
-/// (R1 to R4): the distance at 1, 2.5, 5 and 10 s and the
-/// early features at 1 and 2.5 s, as fp16 pairs (low half first):
+/// What a trial looked like on its way, for the steps ladder: the distance
+/// at 1, 2.5, 5 and 10 s (the rungs R1 to R4) and the early features at 1 and
+/// 2.5 s. The kernel stores it in seven words. Most hold two fp16 values, the
+/// low half first:
 ///
-/// - word 0: d60, d150 (m; a rung the trial did not reach holds the final
-///   distance)
-/// - word 1: d300, d600
-/// - word 2: end code (u16), steps run (u16). The end code: bits 0 and 1 are
-///   set when a screen or a rung stopped it, bit 4 it fell, bit 5 it failed,
-///   bits 6 and 7 the early rung that stopped it (0 none, 1 R1, 2 R2; a stop
-///   by the 5 s screen has neither), bits 8 to 10 and 11 to 13 the cadence
-///   band (`BAND_COUNT` bands of the live gait frequency) at 1 and 2.5 s,
-///   bit 14 an audit creature (every rule off)
-/// - word 3: speed over the half second before 1 s and before 2.5 s (m/s)
-/// - word 4: share of nodes that touched the ground by 1 s, mean muscle
-///   energy store at 1 s
+/// - word 0: d60 and d150, the distances (m) at 1 s and 2.5 s
+/// - word 1: d300 and d600, the distances at 5 s and 10 s
+/// - word 2: the end code (u16), then the steps run (u16)
+/// - word 3: the speed (m/s) over the half second before 1 s, then before
+///   2.5 s
+/// - word 4: at 1 s, the share of nodes that touched the ground, then the
+///   mean muscle energy store
 /// - word 5: the same two at 2.5 s
-/// - word 6: head shake at 1 s and at 2.5 s (m/s^2)
+/// - word 6: the head shake (m/s^2) at 1 s, then at 2.5 s
 ///
-/// Only the CUDA kernel writes it; the other engines leave working state in
-/// these words, so `steps()` is 0 when the trace is absent. fp16 holds a
-/// distance under 256 m to 0.125 m, enough for calibration; the fitness
-/// stays f32.
+/// A distance for a rung that the trial did not reach holds the final
+/// distance. The bits of the end code are:
+///
+/// - bits 0 and 1: both set when a screen or an early rung stopped the trial
+/// - bit 4: the trial ended in a fall (see `GpuResult::fall_time`), which
+///   includes a failed trial
+/// - bit 5: the trial failed
+/// - bits 6 and 7: the early rung that stopped it, 0 for none, 1 for R1 and
+///   2 for R2 (a stop by the 5 s screen sets neither)
+/// - bits 8 to 10 and 11 to 13: the cadence band at 1 s and at 2.5 s
+///   (`BAND_COUNT` bands of the live gait frequency)
+/// - bit 14: an audit creature, which runs with every rule off
+///
+/// Only the CUDA kernel writes it, so `steps()` is 0 for a result that did
+/// not come from the kernel. fp16 holds a distance under 256 m to within
+/// 0.125 m, which is enough to fit the rungs. The fitness stays f32.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RungTrace {
+    /// The seven words, laid out as above.
     pub words: [u32; 7],
     /// The standard trial's fitness (a confirmation may lower the score).
     pub fitness: f32,
 }
 
 impl RungTrace {
-    /// Cadence bands of the early rungs: the live gait frequency in
-    /// `BAND_COUNT` bins of 0 to 6 Hz, as the archive's cadence axis bins it.
+    /// Number of cadence bands the kernel files a trial under at each early
+    /// rung: bins of the live gait frequency over 0 to 6 Hz, as the archive's
+    /// cadence axis bins it. The top band also takes anything above 6 Hz.
     pub const BAND_COUNT: usize = 8;
     /// Steps of the kernel's rungs: 1, 2.5, 5 and 10 s at 60 Hz.
     pub const STEPS: [u32; 4] = [60, 150, 300, 600];
+    /// The fp16 value in the low or the high half of word `word`.
     fn half(&self, word: usize, high: bool) -> f32 {
         f16_to_f32((self.words[word] >> if high { 16 } else { 0 }) as u16)
     }
-    /// Distance at rung `r` (0 to 3: 1, 2.5, 5, 10 s).
+    /// Distance (m) at rung `r` (0 to 3: 1, 2.5, 5, 10 s).
     pub fn distance(&self, r: usize) -> f32 {
         self.half(r / 2, r % 2 == 1)
     }
-    /// End code: 3 when the screen stopped the trial, plus 16 for a fall and
-    /// 32 for a failed trial.
+    /// The end code, the low half of word 2. The type's doc lists its bits.
     pub fn code(&self) -> u16 {
         self.words[2] as u16
     }
-    /// Steps the trial ran, or 0 when no kernel wrote a trace.
+    /// Steps the trial ran, or 0 when the kernel wrote no trace.
     pub fn steps(&self) -> u32 {
         self.words[2] >> 16
     }
-    /// Whether the creature fell during the trial.
+    /// Whether the trial ended in a fall. A broken joint, a head shake past
+    /// its limit and a failed trial count as falls (`GpuResult::fall_time`).
     pub fn fell(&self) -> bool {
         self.code() & 16 != 0
     }
-    /// The early rung that stopped the trial: 1 (R1), 2 (R2), or 0.
+    /// The early rung that stopped the trial: 1 (R1), 2 (R2), or 0 for none.
+    /// A stop by the 5 s screen also gives 0.
     pub fn stopped_by(&self) -> u8 {
         ((self.code() >> 6) & 3) as u8
     }
@@ -181,7 +193,8 @@ impl RungTrace {
     pub fn band(&self, r: usize) -> usize {
         ((self.code() >> (8 + 3 * r)) & 7) as usize
     }
-    /// The creature was an audit creature.
+    /// Whether the creature was an audit creature (`rungs::AUDIT`), which
+    /// runs with every rule off.
     pub fn audit(&self) -> bool {
         self.code() & (1 << 14) != 0
     }
@@ -197,7 +210,7 @@ impl RungTrace {
     pub fn energy(&self, r: usize) -> f32 {
         self.half(4 + r, true)
     }
-    /// Head shake at rung `r` (0 or 1).
+    /// Head shake (m/s^2) at rung `r` (0 or 1).
     pub fn head_shake(&self, r: usize) -> f32 {
         self.half(6, r == 1)
     }
