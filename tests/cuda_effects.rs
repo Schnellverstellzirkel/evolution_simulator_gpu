@@ -1,4 +1,7 @@
-//! The CUDA kernel (the physics authority) under every environment effect.
+//! Scores bodies on the CUDA kernel in a calm world and under each
+//! environment effect in its list, which lacks drought and brambles. No trial
+//! may fail, and each effect must change how far some body gets by more than
+//! 5 mm.
 //!
 //! Needs the RTX 4060 and is ignored by default. Run it with
 //!
@@ -10,8 +13,9 @@ use evolution_simulator::{
 };
 use std::time::Duration;
 
-/// Every environment effect compiles into the CUDA kernel and changes how far
-/// a body gets, and no body's trial fails.
+/// Scores a fixed set of bodies in a calm world, then under each effect. No
+/// trial fails, the stored walkers get more than 5 m in the calm world, and
+/// each effect changes how far some body gets.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_cuda_kernel_feels_every_effect() {
@@ -23,9 +27,11 @@ fn the_cuda_kernel_feels_every_effect() {
         ..Config::default()
     };
     let mut pop = evolution::create(&base).unwrap();
-    let first_hopper = pop.genomes.len();
-    // An elite of an evolved population that walks about 2 m/s under this
-    // kernel.
+    let first_walker = pop.genomes.len();
+    // Eight copies of the stored walker, an elite of a population evolved
+    // under an earlier kernel. It no longer passes the 5 m check below (see
+    // `docs/backlog.md`). Each copy has its own id, because the earthquake
+    // gives every id its own bumps.
     for id in 0..8u64 {
         let mut walker: Creature =
             serde_json::from_str(include_str!("fixtures/warp_walker.json")).unwrap();
@@ -34,6 +40,7 @@ fn the_cuda_kernel_feels_every_effect() {
     }
     let mut gpu = engine::gpu_engine("RTX 4060", 32).expect("GPU");
     assert!(gpu.name().contains("CUDA"), "opened {}", gpu.name());
+    // Scores the whole population under `cfg`.
     let mut run = |cfg: &Config| {
         gpu.submit(pop.clone(), cfg).unwrap();
         loop {
@@ -48,11 +55,12 @@ fn the_cuda_kernel_feels_every_effect() {
         calm.iter().all(|r| r.fitness > -1e19),
         "a calm trial failed"
     );
-    let walked = (first_hopper..calm.len())
+    let walked = (first_walker..calm.len())
         .map(|i| calm[i].fitness)
         .fold(f32::NEG_INFINITY, f32::max);
     eprintln!("the walkers get up to {walked:.2} m");
     assert!(walked > 5.0, "the walkers stand still ({walked} m)");
+    // Each effect with the calm settings plus that one change.
     let effects: Vec<(&str, Config)> = vec![
         (
             "terrain",

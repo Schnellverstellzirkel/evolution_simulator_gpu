@@ -1,6 +1,11 @@
 //! A developer pause (`dev_pause`) holds evaluation back and resumes it
 //! without changing the search: a paused and resumed run of a fixed seed
-//! matches an undisturbed one.
+//! matches an undisturbed one. The test asks for the pause with a request
+//! file, as `tools/pause-game.sh` does.
+//!
+//! Needs the RTX 4060 and is ignored by default. Run it with
+//!
+//!     cargo test --release --test dev_pause -- --ignored
 
 use evolution_simulator::{
     config::Config,
@@ -12,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A new empty directory for one run's pause files. It is not the game's own
+/// pause directory (`dev_pause::dir`), so the test cannot pause the owner's
+/// game.
 fn pause_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "evolution-dev-pause-{tag}-{}-{:?}",
@@ -22,13 +30,21 @@ fn pause_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// What the test compares for one generation: its number, the bits of its
+/// best, median and mean distance, its failed count and archive cells, the
+/// bits of its QD score, and the bits of its percentiles. Floats compare by
+/// their bits, so the runs must match exactly.
 type Row = (u32, u32, u32, u32, usize, usize, u64, Vec<u32>);
 
-/// Runs `generations` generations of a continuous run. With `pause`, the
-/// run is paused through the request file once the second generation is
-/// under way, held for a while, and resumed by removing the file.
+/// Runs `generations` generations of a continuous run on `gpu` and returns a
+/// `Row` for each. With `pause`, the run is paused through the request file
+/// once the second generation has absorbed its first evaluations, held for a
+/// while, and resumed by removing the file. `tag` names the run's pause
+/// directory.
 fn run(gpu: Gpu, cfg: Config, generations: usize, pause: bool, tag: &str) -> Vec<Row> {
     let dir = pause_dir(tag);
+    // The worker only asks this context to repaint, so one without a window
+    // will do.
     let worker = Worker::spawn_with_pause_dir(gpu, eframe::egui::Context::default(), dir.clone());
     worker.send(Command::New(cfg));
     worker.send(Command::Run {
@@ -36,7 +52,8 @@ fn run(gpu: Gpu, cfg: Config, generations: usize, pause: bool, tag: &str) -> Vec
         guided: false,
     });
     let deadline = Instant::now() + Duration::from_secs(900);
-    let mut paused = !pause;
+    // True once the pause is done, or from the start when this run takes none.
+    let mut pause_done = !pause;
     let mut last: Option<Snapshot> = None;
     let history = loop {
         if let Some(snapshot) = worker.view.lock().unwrap().take() {
@@ -44,8 +61,8 @@ fn run(gpu: Gpu, cfg: Config, generations: usize, pause: bool, tag: &str) -> Vec
             last = Some(snapshot);
         }
         if let Some(snapshot) = &last {
-            if !paused && snapshot.generation >= 1 && snapshot.evaluated > 0 {
-                paused = true;
+            if !pause_done && snapshot.generation >= 1 && snapshot.evaluated > 0 {
+                pause_done = true;
                 hold(&worker, &dir);
                 last = None;
                 continue;
@@ -77,8 +94,10 @@ fn run(gpu: Gpu, cfg: Config, generations: usize, pause: bool, tag: &str) -> Vec
         .collect()
 }
 
-/// Pauses the worker through the request file, checks that nothing is
-/// evaluated while it is paused, and resumes it.
+/// Pauses the worker through the request file `pause` in `dir`. It waits for
+/// the worker's acknowledgement file `paused`, checks that the engines are
+/// closed and that the worker's progress does not move while it is paused,
+/// then removes the request and waits for the acknowledgement to go.
 fn hold(worker: &Worker, dir: &std::path::Path) {
     let asked = Instant::now();
     std::fs::write(dir.join("pause"), "test").unwrap();
@@ -91,6 +110,8 @@ fn hold(worker: &Worker, dir: &std::path::Path) {
     }
     let closed = asked.elapsed();
     assert!(worker.dev_pause.view().is_some_and(|v| v.closed));
+    // The generation and counts in the newest snapshot after 0.4 s, or None
+    // when the worker has published none since the last look.
     let progress = |worker: &Worker| {
         std::thread::sleep(Duration::from_millis(400));
         worker
@@ -118,6 +139,8 @@ fn hold(worker: &Worker, dir: &std::path::Path) {
     );
 }
 
+/// Runs the same fixed seed twice on the GPU, once undisturbed and once with a
+/// pause and resume, and compares the histories of both bit for bit.
 #[test]
 #[ignore = "requires a GPU"]
 fn a_paused_gpu_run_matches_an_undisturbed_one() {
