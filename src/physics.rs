@@ -105,7 +105,8 @@ impl Fidelity {
 pub fn solver_passes() -> (usize, usize) {
     (2, 1)
 }
-/// Actuator and safety limits of the physics.
+/// Limits and constants of muscles and bones: speeds, forces, lengths, rhythm
+/// period, the energy store and bone density.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     /// Fastest a muscle's target length may change (m/s).
@@ -155,22 +156,33 @@ impl Limits {
 pub fn limits() -> Limits {
     Limits::DEFAULT
 }
+/// One node of a body: a point mass with a radius and a friction coefficient.
+/// `node`, `body` and `nodes` build its start state.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Node {
+    /// Position (m).
     pub pos: [f32; 2],
+    /// Velocity (m/s).
     pub vel: [f32; 2],
+    /// Radius (m).
     pub radius: f32,
+    /// Friction coefficient of the node.
     pub friction: f32,
+    /// Mass (kg).
     pub mass: f32,
+    /// Nonzero once the node has failed, which makes `fitness` return
+    /// `FAILED`. `node` starts it at 0.
     pub failed: f32,
 }
-/// Mass (kg) of a node of the given diameter.
+/// Mass (kg) of a node of the given diameter. It is 0.1 kg at 0.08 m, grows
+/// with the square of the diameter and stays between 0.02 and 10 kg.
 #[inline]
 pub fn node_mass(diameter: f32) -> f32 {
     (0.1 * (diameter / 0.08).powi(2)).clamp(0.02, 10.0)
 }
-/// A node on its own, without the organs its bones carry.
+/// A node of `gene` at rest with its own mass only. `body` and `nodes` add the
+/// masses of bones, organs and muscles.
 #[inline]
 pub fn node(gene: &NodeGene) -> Node {
     Node {
@@ -193,9 +205,9 @@ pub fn body(genes: &[NodeGene], bones: &[Bone]) -> Vec<Node> {
     nodes
 }
 
-/// Writes a body's initial node state into caller-owned storage. GPU packing
-/// processes millions of small bodies, so this avoids one heap allocation per
-/// creature while preserving the same mass calculation as `body`.
+/// Writes the nodes of `body` into caller-owned storage, so a caller that
+/// builds many bodies can reuse one buffer. `nodes` must have one slot per
+/// gene.
 pub fn body_into(genes: &[NodeGene], bones: &[Bone], nodes: &mut [Node]) {
     assert_eq!(
         nodes.len(),
@@ -226,10 +238,13 @@ fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
         }
     }
 }
-/// A muscle's mass: a fixed part plus a part per metre of its slack length.
+/// A muscle's fixed mass (kg). Its mass is this plus `MUSCLE_MASS_PER_M` per
+/// meter of its slack length.
 pub const MUSCLE_MASS_BASE: f32 = 0.05;
+/// A muscle's mass (kg) per meter of its slack length.
 pub const MUSCLE_MASS_PER_M: f32 = 1.0;
-/// Distance between a muscle's two attachment points on `nodes`.
+/// Distance between a muscle's two attachment points on `nodes`, or 0 when a
+/// bone or node of the muscle does not exist.
 fn muscle_span(bones: &[Bone], nodes: &[Node], m: &Muscle) -> f32 {
     let point = |bone: u32, t: f32| -> Option<[f32; 2]> {
         let bone = bones.get(bone as usize)?;
@@ -288,6 +303,11 @@ pub fn target(m: &Muscle, time: f32) -> f32 {
     };
     m.short + (m.long - m.short) * wave
 }
+/// `target` with the stroke cut so that the target never moves faster than
+/// `Limits::muscle_speed`: the muscle keeps its longest length and its shortest
+/// length rises. The kernel drives a muscle with the same rhythm, apart from
+/// the restarts that touchdowns cause, so `replay_forces` uses this to rebuild
+/// the muscle's drive.
 pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
     // Bound the slope of the entire waveform. Clamping each frame against the
     // previous *raw* target allowed the target to jump on the next frame.
@@ -301,23 +321,28 @@ pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
 /// Joint range constraint for one bone, precomputed from the genome. The bone
 /// turns about its parent node `a` against a reference bone that shares that
 /// node: the parent's own bone, or for bones leaving the root, the first root
-/// bone. Angles are measured from the reference end to the child end.
+/// bone. Angles are measured from the reference end to the child end. The
+/// kernel does not read these constants. It gets each joint's range angles from
+/// `physics2::Model`.
 #[derive(Clone, Copy, Debug)]
 pub struct Joint {
     /// Far node of the reference bone; `None` for the unconstrained first bone.
     pub reference: Option<usize>,
-    /// Direction of the middle of the allowed range, relative to the reference.
+    /// Direction of the middle of the allowed range, relative to the reference,
+    /// as a cosine and a sine.
     pub center: [f32; 2],
     /// Cosine and sine of half the allowed range.
     pub half: [f32; 2],
     /// Share of a correction taken by the child end (by inverse inertia).
     pub child_share: f32,
-    /// Masses of the child and reference ends over the three joint masses,
-    /// used to keep the joint's center of mass in place.
+    /// Mass of the child end over the sum of the pivot, child and reference
+    /// masses.
     pub child_mass: f32,
+    /// Mass of the reference end over the same sum.
     pub reference_mass: f32,
 }
 impl Joint {
+    /// A joint with no limit: its half range is pi, so every angle is allowed.
     pub const FREE: Joint = Joint {
         reference: None,
         center: [1.0, 0.0],
@@ -327,25 +352,27 @@ impl Joint {
         reference_mass: 0.0,
     };
 }
-/// How much heavier a node resting on the ground counts, per unit of grip
-/// (node friction times ground friction), when bones pull on it during the
-/// constraint passes. The solver splits every bone correction by mass, so a
-/// light foot would otherwise be dragged along by its heavy body instead of
-/// holding its place; with this, a body pivots over planted feet. On ice the
-/// grip is small, so feet still slide.
+/// Not read by any code. An earlier solver counted a node resting on the
+/// ground this much heavier per unit of grip (node friction times ground
+/// friction) when bones pulled on it. A light foot then held its place instead
+/// of being dragged along by its heavy body, and a body pivoted over planted
+/// feet. The kernel has no such weight.
 pub const STANCE_GRIP: f32 = 10.0;
-/// Feet on the ground sliding slower than this (m/s, mass-weighted mean) count
-/// as planted, so friction may push the body forward from them. Faster, the
-/// feet slide and friction can only oppose the slide.
+/// Not read by any code. An earlier solver let friction push a body forward
+/// only from feet sliding slower than this (m/s, mass-weighted mean), and
+/// friction could only oppose the slide of faster feet. The kernel has no such
+/// rule. Its friction only takes back sliding.
 pub const PLANTED_SPEED: f32 = 0.01;
-/// Static friction: a foot that barely slides can take `1 + STATIC_EXTRA`
-/// times the kinetic friction bound. The extra fades linearly to nothing
-/// between 1 cm/s and 2 cm/s of slide, so no step chatters across a switch.
-/// The kernels write the same numbers as literals (0.25, 0.02, 100.0).
+/// Not read by any code. An earlier solver let a foot that barely slid take
+/// `1 + STATIC_EXTRA` times the kinetic friction bound. The extra faded
+/// linearly to nothing between 1 cm/s and 2 cm/s of slide, so no step chattered
+/// across a switch. The kernel has no static friction.
 pub const STATIC_EXTRA: f32 = 0.25;
-/// Slide speed (m/s) at which the static extra is gone.
+/// Not read by any code. The slide speed (m/s) at which the static extra was
+/// gone.
 pub const STATIC_FADE_END: f32 = 0.02;
-/// The static factor, `1 + STATIC_EXTRA * clamp((STATIC_FADE_END - |slide|) * 100, 0, 1)`.
+/// Not called by any code. The static factor, `1 + STATIC_EXTRA *
+/// clamp((STATIC_FADE_END - |slide|) * 100, 0, 1)`, written with literals.
 pub fn static_factor(slide: f32) -> f32 {
     1.0 + 0.25 * ((0.02 - slide.abs()) * 100.0).clamp(0.0, 1.0)
 }
@@ -355,14 +382,19 @@ pub fn static_factor(slide: f32) -> f32 {
 /// body jiggling at the physics step rate does not, so solver jitter cannot
 /// carry a creature forward.
 pub const HEAD_SHAKE_LIMIT: f32 = 8.0 * 9.8;
+/// Seconds over which the head's acceleration is averaged for
+/// `HEAD_SHAKE_LIMIT`.
 pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
-/// Early screening of a standard trial: at `seconds` after settling, a
+/// Early screening of a standard trial: at `seconds` into the trial, a
 /// creature whose distance is below `bar` stops, like a fall, keeping that
 /// distance. Survivors run the full trial. A screened creature never enters
 /// an archive, so every elite has a full trial.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
+    /// Seconds into the trial at which the screen applies.
     pub seconds: f32,
+    /// The distance (m) below which a creature stops; negative infinity is no
+    /// bar.
     pub bar: f32,
     /// The bar of a young creature (`rungs::YOUNG`): a body from a nursery
     /// is held to the distance its own kind reaches at the screen, because
@@ -383,12 +415,14 @@ impl Screen {
             reshaped_bar: bar,
         }
     }
-    /// The step at whose end the screen applies.
+    /// The step at whose end the screen applies, plus `settle`.
+    /// `kernel::params` takes the `settle` off again for the kernel's step
+    /// count.
     pub fn tick(self, fidelity: Fidelity) -> u32 {
         fidelity.settle() + ((self.seconds * fidelity.rate as f32).round() as u32).max(1) - 1
     }
 }
-/// Seconds after settling at which trials are screened.
+/// Seconds into a trial at which it is screened.
 pub fn screen_seconds() -> Option<f32> {
     Some(5.0)
 }
@@ -400,7 +434,8 @@ pub fn screen_keep() -> f32 {
     0.1
 }
 /// The distance that the best `keep` share of `distances` reached (NaN
-/// entries are ignored), or no bar when fewer than 64 distances are known.
+/// entries are ignored). There is no bar, negative infinity, when fewer than
+/// 64 distances are known or when `keep` is 1 or more.
 pub fn screen_bar(distances: impl Iterator<Item = f32>, keep: f32) -> f32 {
     let mut distances: Vec<f32> = distances.filter(|d| !d.is_nan()).collect();
     if distances.len() < 64 || keep >= 1.0 {
@@ -413,7 +448,6 @@ pub fn screen_bar(distances: impl Iterator<Item = f32>, keep: f32) -> f32 {
 /// broken joint ends the trial like a fall, so no gait can profit from
 /// muscles forcing joints round like wheels.
 pub const JOINT_BREAK: f32 = 0.5;
-/// Joint constraints for a canonical (parent-first) skeleton.
 /// Reference node of bone `index`'s joint: its parent bone's pivot, or for a
 /// bone at the root the first root bone's child. `None` for a free joint. It
 /// depends only on the skeleton, so every creature of a body plan shares it.
@@ -427,14 +461,17 @@ pub fn joint_reference(bones: &[Bone], index: usize) -> Option<usize> {
         },
     }
 }
-/// Rounds to the GPU's snorm16 storage of the joint range center.
+/// Rounds `v`, clamped to [-1, 1], to the nearest multiple of 1/32767, the grid
+/// of a signed 16-bit normalized number. `joints_from_body` rounds
+/// `Joint::center` this way.
 fn snorm16(v: f32) -> f32 {
     (v.clamp(-1.0, 1.0) * 32767.0).round() / 32767.0
 }
 
-/// Writes joint constants using an already computed body state. Callers that
-/// pack many bodies can reuse the output slice and avoid allocating both the
-/// body nodes and the joint vector for every creature.
+/// Writes the joints that `joints` returns into `out`, from a body `state` that
+/// the caller already computed with `body`. A caller that builds many creatures
+/// can reuse both buffers. `state` needs one node per gene and `out` one slot
+/// per bone.
 pub fn joints_from_body(genes: &[NodeGene], bones: &[Bone], state: &[Node], out: &mut [Joint]) {
     assert_eq!(
         state.len(),
@@ -473,6 +510,7 @@ pub fn joints_from_body(genes: &[NodeGene], bones: &[Bone], state: &[Node], out:
     }
 }
 
+/// The joint constraints of a canonical (parent-first) skeleton, one per bone.
 pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
     let state = body(genes, bones);
     let mut out = vec![Joint::FREE; bones.len()];
@@ -486,8 +524,9 @@ pub const TERRAIN_AMPLITUDES: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 pub fn terrain_amplitude(level: u8) -> f32 {
     TERRAIN_AMPLITUDES[usize::from(level).min(TERRAIN_AMPLITUDES.len() - 1)]
 }
-/// Wavelengths (m), weights, and phase offsets of the two bump trains. The
-/// engines and the UI all evaluate the same ground.
+/// Wavelength (m), weight, and phase offset (wave turns) of each of the two
+/// bump trains. The kernel's `ground` writes the same numbers as literals, so
+/// a change here needs the same change there.
 pub const TERRAIN_WAVES: [(f32, f32, f32); 2] = [(1.1, 0.65, 0.0), (0.43, 0.35, 0.3)];
 /// Ground height and slope at `x` for bump height `amplitude`. Each bump is
 /// 16 u^2 (1 - u)^2 over one wavelength: smooth, cheap, and free of trig.
@@ -497,7 +536,7 @@ pub fn terrain(x: f32, amplitude: f32) -> (f32, f32) {
 /// Ground height and slope of the bump trains with a phase in wave turns:
 /// `phase` shifts both trains by the same fraction of their wavelength. The
 /// earthquake effect passes a per-creature phase here; a 16-bit fraction is
-/// exactly representable, so both engines apply it bit for bit.
+/// exactly representable, so the host and the kernel use the same phase.
 pub fn terrain_phase(x: f32, amplitude: f32, phase: f32) -> (f32, f32) {
     let mut height = 0.0;
     let mut slope = 0.0;
@@ -511,8 +550,8 @@ pub fn terrain_phase(x: f32, amplitude: f32, phase: f32) -> (f32, f32) {
     (amplitude * height, amplitude * slope)
 }
 /// Ground height and slope at `x` for bump height `amplitude` plus a linear
-/// `tilt` (rise over run) that raises the ground in the +x direction. The two
-/// engines sample this same ground; `tilt` is 0 when the slope effect is calm
+/// `tilt` (rise over run) that raises the ground in the +x direction. The
+/// kernel samples the same ground; `tilt` is 0 when the slope effect is calm
 /// or the ground is disabled.
 pub fn terrain_with_slope(x: f32, amplitude: f32, tilt: f32) -> (f32, f32) {
     let (height, slope) = terrain(x, amplitude);
@@ -530,7 +569,7 @@ pub fn gap_spacing(width: f32) -> f32 {
 }
 /// Ground height (m, negative) and slope of the periodic pits for pit width
 /// `width`; both are 0 on solid ground. Pit centers sit at odd multiples of
-/// `gap_spacing / 2`, so x = 0 is solid ground. Every engine and the UI carve
+/// `gap_spacing / 2`, so x = 0 is solid ground. The kernel and the UI carve
 /// the same pits.
 pub fn gaps(x: f32, width: f32) -> (f32, f32) {
     if width <= 0.0 {
@@ -566,7 +605,7 @@ pub const HURDLE_RUN: f32 = 0.2;
 /// Ground height (m, positive) and slope of the periodic raised steps for step
 /// height `height`; both are 0 on clear ground. Each step is a ramp up, a flat
 /// top of `HURDLE_TOP` meters, and a ramp down, centered at odd multiples of
-/// half the spacing, so x = 0 starts on clear ground. Every engine and the UI
+/// half the spacing, so x = 0 starts on clear ground. The kernel and the UI
 /// raise the same steps.
 pub fn hurdles(x: f32, height: f32) -> (f32, f32) {
     if height <= 0.0 {
@@ -592,10 +631,10 @@ pub fn hurdles(x: f32, height: f32) -> (f32, f32) {
     };
     (height * factor, height * factor_slope)
 }
-/// Deterministic earthquake stream of a creature id. Both engines derive a
-/// creature's terrain from this same unsigned word, so a replay and both
-/// engines give one creature one ground. Only the low 32 bits of the id are
-/// mixed; the GPU receives the mixed word directly.
+/// Deterministic earthquake stream of a creature id. The kernel and the UI
+/// derive a creature's terrain from this same unsigned word, so a replay shows
+/// the ground the kernel scored. Only the low 32 bits of the id are mixed; the
+/// GPU receives the mixed word directly.
 #[inline]
 pub fn quake_hash(id: u64) -> u32 {
     let mut x = id as u32;
@@ -606,24 +645,25 @@ pub fn quake_hash(id: u64) -> u32 {
     x ^= x >> 16;
     x
 }
-/// Phase (wave turns, 0 to 1) of a creature's earthquake bumps, from its
-/// hash. A 16-bit fraction is exactly representable in f32, so every engine
-/// gets a stable phase value without requiring matching trajectories.
+/// Phase (wave turns, 0 to 1) of a creature's earthquake bumps, from the low
+/// 16 bits of its hash. A 16-bit fraction is exactly representable in `f32`,
+/// so the host and the kernel get the same value.
 pub fn quake_phase(hash: u32) -> f32 {
     (hash & 0xffff) as f32 * (1.0 / 65536.0)
 }
-/// Amplitude multiplier of a creature's earthquake bumps, 0.6 to 1.4, from
-/// its hash. Applied to `Config::quake` on top of the shared roughness.
+/// Amplitude multiplier of a creature's earthquake bumps, 0.6 to 1.4, from the
+/// high 16 bits of its hash. Applied to `Config::quake` on top of the shared
+/// roughness.
 pub fn quake_scale(hash: u32) -> f32 {
     0.6 + ((hash >> 16) & 0xffff) as f32 * (0.8 / 65536.0)
 }
 /// Ground height and slope at `x` for bump height `amplitude`, linear `tilt`,
 /// periodic pits of opening `width`, and raised steps of height `hurdle`.
 /// `phase` is the earthquake phase in wave turns applied to the bumps alone.
-/// This is the one place the effects join the ground; `width` and `hurdle`
-/// are 0 when the gaps or hurdles effects are calm, the phase is 0 when the
-/// quake is still, and the tilt, pits, and steps are zeroed when the ground
-/// is disabled.
+/// This is the one place on the host where the effects join the ground; the
+/// kernel joins them in its own `ground`. `width` and `hurdle` are 0 when the
+/// gaps or hurdles effects are calm, the phase is 0 when the quake is still,
+/// and the tilt, pits, and steps are zeroed when the ground is disabled.
 pub fn ground(
     x: f32,
     amplitude: f32,
@@ -660,9 +700,10 @@ pub const MUD_FULL_DEPTH: f32 = 0.10;
 pub const BRAMBLE_REACH: f32 = 0.01;
 /// Distance (m) between the starts of two ice patches.
 pub const ICE_SPACING: f32 = 6.0;
-/// How icy the ground is at `x`, from 0 (dry) to 1 (ice): bands about 2.4 m
-/// wide in the middle of every `ICE_SPACING`, with smooth 0.8 m edges. Only
-/// IEEE arithmetic, so the kernels compute it bit for bit the same.
+/// How icy the ground is at `x`, from 0 (dry) to 1 (ice). Every `ICE_SPACING`
+/// holds 1.8 m of full ice in the middle, a smooth edge of 1.2 m on each side
+/// and 1.8 m of dry ground between patches. Only IEEE arithmetic, no trig. The
+/// kernel's `ice_at` is the same formula.
 pub fn ice(x: f32) -> f32 {
     let u = x * (1.0 / ICE_SPACING);
     let w = u - u.floor();
@@ -670,7 +711,9 @@ pub fn ice(x: f32) -> f32 {
     let s = ((0.7 - t) * 2.5).clamp(0.0, 1.0);
     s * s * (3.0 - 2.0 * s)
 }
-/// Fitness as the center of mass's horizontal distance, or `FAILED` if any node failed.
+/// Fitness as the center of mass's horizontal distance, or `FAILED` if any node
+/// failed. The kernel scores trials itself. The UI uses this for the distance
+/// of a replay pose.
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
         FAILED
