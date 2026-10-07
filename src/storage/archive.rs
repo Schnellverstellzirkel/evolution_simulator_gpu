@@ -433,9 +433,8 @@ impl Experiment {
             });
         timings[1] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        // The selected evaluation engine owns the score and behavior. CPU
-        // playback and cross-engine comparisons are diagnostics only; they do
-        // not edit archive fitness or descriptors.
+        // The global archive is offered only the best candidate of each of its
+        // cells, and the first one when scores tie.
         let mut prep = prep;
         let mut best_by_niche: FastMap<qd::Niche, usize> = FastMap::default();
         for (j, p) in prep.iter().enumerate() {
@@ -457,6 +456,9 @@ impl Experiment {
         }
         timings[2] += section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
+        // In block order: count the failed trials, offer the candidates to the
+        // global archive, count each island result as an attempt of its
+        // emitter, and rank the CMA samples.
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
         let mut global_changed = false;
@@ -467,7 +469,8 @@ impl Experiment {
             }
             let cma = births[j].cma;
             if arena_of[j] as usize >= island_count() {
-                // Nursery samples rank by distance alone.
+                // A nursery result is no attempt of its emitter. Its CMA
+                // samples rank by distance alone.
                 if prep.emitter == Emitter::Cma
                     && let Some(cma) = cma
                     && let Some(samples) = cma_samples.get_mut(cma)
@@ -480,10 +483,11 @@ impl Experiment {
             }
             let emitter_index = prep.emitter.index();
             attempts[emitter_index] += 1;
-            // The CMA improvement key needs the cell's fitness before the
-            // offers; only CMA samples use it. The prefilter read the cell's
-            // elite before any offer of this block; after the first
-            // insertion a new read keeps the order.
+            // The CMA improvement key needs the fitness of the cell's elite
+            // before this creature's offer, and only CMA samples use it. Until
+            // the first insertion of the block, the prefilter's read of it
+            // still holds. After that, the cell is read again, so the key sees
+            // the offers made before this one.
             let elite_before = if !behavior_inserted {
                 prep.elite_before
             } else {
@@ -512,8 +516,11 @@ impl Experiment {
                 qd::Offer::default()
             };
             behavior_inserted |= offer.inserted;
-            // CMA-ME improvement ranking: new niches first, then improvement over
-            // the niche's elite, then how far short of it a sample fell.
+            // A CMA-ME emitter ranks its samples by improvement. First come the
+            // creatures that took an empty cell. Then come those that beat their
+            // cell's elite, by how much. Next come the ones that fell short of
+            // the elite, by how far. Last come the ones that found the cell
+            // empty and did not enter. An optimizer ranks by distance alone.
             if prep.emitter == Emitter::Cma
                 && let Some(cma) = cma
                 && let Some(samples) = cma_samples.get_mut(cma)
@@ -543,7 +550,8 @@ impl Experiment {
                 }
             }
         }
-        // Island reserve entries count for their emitters like archive entries.
+        // The reserve entries of the islands count for their emitters like the
+        // global archive's entries.
         for (emitter_index, offer) in reserve_offers {
             rewards[emitter_index] += offer.reward;
             if offer.new_niche {
@@ -554,6 +562,9 @@ impl Experiment {
         }
         timings[3] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
+        // The CMA emitters learn from their samples, and the emitter statistics
+        // take the block's counts. Then each emitter's last parent is found
+        // again by its id, because the offers may have moved it.
         for (emitter, samples) in self.cma_emitters.iter_mut().zip(&mut cma_samples) {
             emitter.tell(population, samples);
         }
@@ -581,6 +592,8 @@ impl Experiment {
         }
         timings[5] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
+        // A creature that entered several archives is listed once. It gets a
+        // lineage record unless it has one already.
         entered.sort_unstable();
         entered.dedup();
         let entered_count = entered.len();
@@ -590,6 +603,7 @@ impl Experiment {
             .collect();
         self.lineage.extend(records);
         timings[6] = section.elapsed().as_secs_f64();
+        // The figure after "block" is the number of creatures in the block.
         if profile {
             eprintln!(
                 "Archive profile: generation {}, block {}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
