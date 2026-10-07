@@ -274,21 +274,29 @@ impl IslandSummary {
         graduation: crate::storage::Graduation,
     ) -> Self {
         let mut origins = [0; qd::EMITTER_COUNT];
-        let mut ranked: Vec<&qd::Elite> = island
+        // The fastest `ISLAND_TOP` in one pass, the earlier elite first on a
+        // tie, as a stable sort by distance would give them.
+        let mut ranked: Vec<&qd::Elite> = Vec::with_capacity(ISLAND_TOP + 1);
+        for elite in island
             .entries
             .iter()
             .filter(|elite| !qd::is_morphology_niche(&elite.niche))
-            .inspect(|elite| {
-                let origin = if elite.graduate {
-                    qd::Emitter::Restart
-                } else {
-                    elite.emitter
-                };
-                origins[origin.index()] += 1;
-            })
-            .collect();
-        ranked.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-        ranked.truncate(ISLAND_TOP);
+        {
+            let origin = if elite.graduate {
+                qd::Emitter::Restart
+            } else {
+                elite.emitter
+            };
+            origins[origin.index()] += 1;
+            let at = ranked
+                .iter()
+                .position(|kept| elite.fitness.total_cmp(&kept.fitness).is_gt())
+                .unwrap_or(ranked.len());
+            if at < ISLAND_TOP {
+                ranked.insert(at, elite);
+                ranked.truncate(ISLAND_TOP);
+            }
+        }
         let top: Vec<(f32, Creature)> = ranked
             .iter()
             .map(|elite| (elite.fitness, elite.creature.unpack()))
@@ -668,6 +676,58 @@ fn end_to_end_rate(marks: &std::collections::VecDeque<(Instant, usize)>) -> f64 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An island summary's fastest elites are the first of a stable sort by
+    /// distance, ties included.
+    #[test]
+    fn an_island_summary_ranks_its_fastest_elites_as_a_stable_sort() {
+        let config = Config {
+            population: 200,
+            random_seed: false,
+            seed: 9,
+            ..Config::default()
+        };
+        let population = crate::evolution::create(&config).unwrap();
+        let mut island = qd::QdArchive::default();
+        for index in 0..200usize {
+            let descriptor = qd::Descriptor {
+                ground_contact: (index % 10) as f32 / 10.0,
+                gait_frequency: (index / 10 % 6) as f32,
+                vertical_oscillation: 0.1,
+                mean_height: 0.4,
+                feet: 2.0,
+                ..Default::default()
+            };
+            // Few distinct distances, so the top holds ties.
+            let fitness = 1.0 + (index * 7 % 5) as f32;
+            island.offer(
+                &population,
+                index,
+                descriptor,
+                fitness,
+                false,
+                qd::Emitter::Cma,
+                0,
+                0,
+            );
+        }
+        let empty = qd::QdArchive::default();
+        let summary = IslandSummary::of(&island, [&empty, &empty], Default::default());
+        let mut sorted: Vec<&qd::Elite> = island
+            .entries
+            .iter()
+            .filter(|elite| !qd::is_morphology_niche(&elite.niche))
+            .collect();
+        sorted.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        let expected: Vec<(f32, u64)> = sorted
+            .iter()
+            .take(ISLAND_TOP)
+            .map(|elite| (elite.fitness, elite.creature.id))
+            .collect();
+        let got: Vec<(f32, u64)> = summary.top.iter().map(|(f, c)| (*f, c.id)).collect();
+        assert!(island.behavior_count() > ISLAND_TOP);
+        assert_eq!(got, expected);
+    }
 
     #[test]
     fn a_loaded_history_rebuilds_its_world_changes() {
