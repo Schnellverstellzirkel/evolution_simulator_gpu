@@ -94,9 +94,9 @@ impl Experiment {
             /// The result enters no archive: its trial was screened or
             /// excluded, or its block is stale.
             screened: bool,
-            /// For a CMA sample, the fitness of the global archive's elite in
-            /// its cell at the start of the block. None when the cell is empty
-            /// or the creature is no CMA sample.
+            /// For a CMA sample with a usable score, the fitness of the global
+            /// archive's elite in its cell at the start of the block. None for
+            /// any other creature and for an empty cell.
             elite_before: Option<f32>,
         }
         let arenas = self.islands.len().max(arena_count());
@@ -660,6 +660,8 @@ impl Experiment {
                 ways[((1.0 - p / 100.0) * (count - 1) as f32).round() as usize].fitness
             }
         };
+        // The histogram bins the elites by distance in centimeters. `species`
+        // counts them by node count and muscle count.
         let mut histogram = BTreeMap::<i32, u32>::new();
         let mut species = BTreeMap::<(usize, usize), u32>::new();
         let mut sum = 0.0f64;
