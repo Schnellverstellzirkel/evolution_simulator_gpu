@@ -1,18 +1,22 @@
+//! This module writes and reads the save file and exports the history as
+//! CSV, and `storage` re-exports its public items. A save starts with the
+//! magic, then a small uncompressed header (`SaveHeader`), so the game can
+//! turn down a save it cannot use before it reads the body. The body keeps
+//! only the archives and the search state (`SmallSave`), and a loaded game
+//! breeds its population from the archives again. Another `EVORUST` magic is
+//! an older format and is turned down.
+
 use super::*;
 
-// The file starts with the magic, then a small uncompressed header
-// (`SaveHeader`), so the game can turn down a save it cannot use before it
-// reads gigabytes. The body keeps only the archives and the search state
-// (`SmallSave`). A loaded game breeds its population from the archives again.
-// Any other magic is an older format and is turned down.
-
+/// The first eight bytes of a save. The version of the archives and physics
+/// (`qd::VERSION`) is in the header that follows.
 const MAGIC: &[u8; 8] = b"EVORUST8";
 
 /// What a save holds: the archives and the search state, without the
 /// population, its scores, or anything bred for the generation in progress.
 /// It holds the islands and the nurseries of new bodies, and none of the
-/// nurseries of reshaped bodies: they refill from the bodies the islands
-/// turn away, and a save stays as small as it was.
+/// nurseries of reshaped bodies. They refill from the bodies the islands
+/// turn away, so leaving them out keeps a save smaller.
 #[derive(Serialize)]
 struct SmallSave<'a> {
     config: &'a Config,
@@ -31,6 +35,8 @@ struct SmallSave<'a> {
     ring: RingShape,
     audit: &'a crate::rungs::Audit,
 }
+/// What `SmallSave` wrote, read back. Its fields match `SmallSave` one for one
+/// and in the same order, because `bincode` stores no field names.
 #[derive(Deserialize)]
 struct SmallLoad {
     config: Config,
@@ -63,14 +69,17 @@ struct SavedLineage<'a> {
     keep: HashMap<u64, bool>,
 }
 impl<'a> SavedLineage<'a> {
-    /// The lineage of the global archive and of the first `held` archives
-    /// of the experiment, the ones a save holds.
+    /// Picks the records to write for the global archive and the first `held`
+    /// archives of the experiment, the ones a save holds.
     fn of(e: &'a Experiment, held: usize) -> Self {
         let archives = || std::iter::once(&e.archive).chain(e.islands[..held].iter());
         let mut keep: HashMap<u64, bool> = HashMap::new();
+        // Every living elite keeps a record without its creature.
         for elite in archives().flat_map(|archive| &archive.entries) {
             keep.insert(elite.creature.id, false);
         }
+        // The elites whose ancestors are kept: all of the global archive's,
+        // and the `ISLAND_LEADERS` fastest of each island.
         let mut shown: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
         for island in e.islands.iter().take(island_count()) {
             let mut fastest: Vec<&qd::Elite> = island.entries.iter().collect();
@@ -85,10 +94,11 @@ impl<'a> SavedLineage<'a> {
                     break;
                 };
                 if keep.get(&id) == Some(&true) {
-                    // The rest of this chain is already kept.
+                    // An earlier chain kept this record with its creature.
                     break;
                 }
-                // A living elite keeps its record without its creature.
+                // A living elite is in the map already and stays without its
+                // creature.
                 keep.entry(id).or_insert(true);
                 current = ancestor.parent;
             }
@@ -101,7 +111,8 @@ impl<'a> SavedLineage<'a> {
 }
 impl Serialize for SavedLineage<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        /// `Ancestor`, field for field.
+        /// `Ancestor`, field for field and in its order, with the creature
+        /// borrowed.
         #[derive(Serialize)]
         struct Record<'b> {
             parent: Option<u64>,
@@ -111,7 +122,12 @@ impl Serialize for SavedLineage<'_> {
             change: &'b str,
             rung: &'b [u16; 2 * crate::rungs::FEATURES],
         }
+        // A record written without its creature holds this empty one.
+        // Loading finds it with `StoredCreature::is_empty` and puts the
+        // creature back from the archive.
         let none = StoredCreature::default();
+        // `bincode` needs the length of a map before its entries, so the
+        // records are collected first.
         let records: Vec<(&u64, Record)> = self
             .keep
             .iter()
@@ -160,10 +176,11 @@ impl<'a> SmallSave<'a> {
 }
 impl SmallLoad {
     /// The game the save describes, at the start of its saved generation.
-    /// Its ring is bred from the archives, as the game would have bred it;
-    /// without elites it starts with new random bodies.
-    /// `saved_version` is the version the file's header names: an older one
-    /// that still loads (`qd::loadable`) gets its archives re-binned.
+    /// Its ring is bred from the archives, as the game would have bred it.
+    /// With no elites and no queued reseeds, its ring holds new random bodies.
+    /// `saved_version` is the version the file's header names. An older one
+    /// that still loads (`qd::loadable`) gets its archives re-binned. It fails
+    /// when the saved state is not valid (`Experiment::validate`).
     fn into_experiment(self, saved_version: u32) -> Result<Experiment> {
         let mut e = Experiment::empty(self.config);
         e.pending = self.pending;
@@ -211,9 +228,14 @@ impl SmallLoad {
                 && e.cma_emitters.iter().all(|c| c.island < arena_count()),
             "Invalid island state"
         );
+        // The global archive and the islands read their layout from their
+        // elites. A nursery of new bodies is never refined, and a nursery of
+        // reshaped bodies starts refined.
         let refinable =
             std::iter::once(&mut e.archive).chain(e.islands.iter_mut().take(island_count()));
         if saved_version == qd::VERSION {
+            // The elites sit in their cells already, so only the indices and
+            // the layout are rebuilt.
             for archive in refinable {
                 archive.rebuild_indices();
                 archive.derive_refined();
@@ -222,10 +244,11 @@ impl SmallLoad {
                 nursery.rebuild_indices();
             }
         } else {
-            // The archives were saved under another layout: each elite moves
-            // to its cell now. A version 54 archive with elites in body
-            // classes was refined. Optimizers keep their body plan's state;
-            // the CMA emitters of single cells start over.
+            // The archives were saved under another layout, so each elite
+            // moves to its cell in the current one. From version 54 on, the
+            // elites tell whether an archive was refined. Optimizers keep
+            // their body plan's state. The CMA emitters of single cells start
+            // over.
             for archive in refinable {
                 if saved_version >= 54 {
                     archive.rebuild_indices();
@@ -239,13 +262,14 @@ impl SmallLoad {
             e.cma_emitters.retain(CmaEmitter::optimizing);
         }
         // The global archive is always refined: it never breeds, so it has no
-        // climb to protect. The islands are refined at the next generation
-        // boundary if they are old enough.
+        // climb to protect. The main islands are refined at the next
+        // generation boundary if they are old enough (`refine_archives`).
         if !e.archive.refined() {
             e.archive.set_refined(true);
             e.archive.rebin();
         }
         // The lineage records of living elites were saved without a creature.
+        // Each takes it from its elite.
         for elite in std::iter::once(&e.archive)
             .chain(&e.islands)
             .flat_map(|archive| &archive.entries)
@@ -259,7 +283,8 @@ impl SmallLoad {
         // The screen bar is not saved: the resumed generation runs every
         // trial in full until it has set a new one.
         e.config.screen = e.next_screen(e.config.duration);
-        // The rungs' rules are not saved either: they are the window's fit.
+        // The rungs' rules are not saved either. They are fitted from the
+        // saved audit window.
         e.config.rungs = e.rungs.fit(e.global_stalled());
         let shared = Arc::new(e.config.clone());
         let elites =
@@ -289,10 +314,10 @@ impl SmallLoad {
     }
 }
 
-/// Autosaves kept in `dir`: the newest `keep` `seed-*-auto.evo` files stay,
-/// older ones are deleted, and so are `.evo.tmp` files that an interrupted
-/// save left behind more than ten minutes ago. Files the player saved under
-/// other names are never touched. Returns how many files were removed.
+/// Keeps the newest `keep` autosaves in `dir` and deletes the older ones. An
+/// autosave is a `seed-*-auto.evo` file. It also deletes the `.evo.tmp` files
+/// that an interrupted save left behind more than ten minutes ago. Saves under
+/// other names are never touched. Returns how many files it removed.
 pub fn rotate_autosaves(dir: &Path, keep: usize) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -325,14 +350,22 @@ pub fn rotate_autosaves(dir: &Path, keep: usize) -> usize {
     }
     removed
 }
-/// What a save's header says, read without decoding the save.
+/// What a save's header says, read without decoding the save. The header is
+/// 16 bytes after the magic: `qd_version` and `generation` as 4-byte integers,
+/// then `population` as an 8-byte integer, all little endian.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SaveHeader {
+    /// The version of the archives and physics (`qd::VERSION`) of the game
+    /// that wrote the save.
     pub qd_version: u32,
+    /// The generation in progress when the save was taken. A loaded game
+    /// starts it again.
     pub generation: u32,
+    /// Creatures in a generation.
     pub population: u64,
 }
 impl SaveHeader {
+    /// The size of the header in bytes.
     const BYTES: usize = 16;
     fn of(experiment: &Experiment) -> Self {
         Self {
@@ -362,17 +395,24 @@ impl SaveHeader {
 /// or written so far, the file size when known, and a flag that stops it.
 #[derive(Default)]
 pub struct Progress {
+    /// File bytes read or written so far.
     pub done: std::sync::atomic::AtomicU64,
+    /// The file size in bytes. A load sets it once the file is open. A save
+    /// does not set it.
     pub total: std::sync::atomic::AtomicU64,
+    /// Set to true to stop the load or save. Its next read or write fails
+    /// with "cancelled".
     pub cancel: std::sync::atomic::AtomicBool,
 }
 
-/// A file that counts its bytes into a `Progress` and fails once cancelled.
+/// A reader or writer that counts its bytes into a `Progress` and fails once
+/// the progress is cancelled. Without a `Progress` it only passes bytes on.
 struct Counted<'a, T> {
     inner: T,
     progress: Option<&'a Progress>,
 }
 impl<T> Counted<'_, T> {
+    /// Adds `bytes` to the progress, or fails if it was cancelled.
     fn count(&self, bytes: usize) -> std::io::Result<()> {
         use std::sync::atomic::Ordering::Relaxed;
         if let Some(progress) = self.progress {
@@ -402,8 +442,8 @@ impl<T: Write> Write for Counted<'_, T> {
     }
 }
 
-/// Reads a save's header. Saves from before the header are from older game
-/// versions, whose creatures were scored under other physics.
+/// Reads a save's header and nothing else. It fails with a message for a file
+/// that is not a save, for a save in an older format and for a file cut short.
 pub fn peek(path: &Path) -> Result<SaveHeader> {
     let mut file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
     let mut magic = [0; 8];
@@ -435,11 +475,14 @@ fn reject_other_formats(path: &Path, magic: &[u8; 8]) -> Result<()> {
 /// The header of a save the game can load now, or a message saying why not.
 pub fn check(path: &Path) -> Result<SaveHeader> {
     let header = peek(path)?;
-    ensure_current_version(path, &header)?;
+    ensure_loadable(path, &header)?;
     Ok(header)
 }
 
-fn ensure_current_version(path: &Path, header: &SaveHeader) -> Result<()> {
+/// Fails with a message unless the game can load the header's physics version
+/// (`qd::loadable`): the current one, or an older one back to
+/// `qd::OLDEST_LOADABLE`.
+fn ensure_loadable(path: &Path, header: &SaveHeader) -> Result<()> {
     ensure!(
         qd::loadable(header.qd_version),
         "{} was saved under physics version {}, and this game uses version {}. Its scores no longer hold, so it cannot be loaded; start a new population instead.",
@@ -450,12 +493,16 @@ fn ensure_current_version(path: &Path, header: &SaveHeader) -> Result<()> {
     Ok(())
 }
 
+/// Saves `experiment` to `path`, with no progress to report.
 pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     save_with_progress(path, experiment, None)
 }
 
-/// Saves through a temporary file that is renamed only once complete; a
-/// failed or cancelled save removes it.
+/// Saves `experiment` to `path`, counting the bytes written into `progress`
+/// and failing once the `cancel` flag of `progress` is set. The file is the
+/// magic, the header, and a `zstd` stream that holds `SmallSave` followed by
+/// the last migration. It goes through a temporary file that is renamed only
+/// once complete. A failed or cancelled save removes the temporary file.
 pub fn save_with_progress(
     path: &Path,
     experiment: &Experiment,
@@ -479,7 +526,7 @@ pub fn save_with_progress(
         // apart in the stream: matching over 128 MB made a save 28% smaller.
         encoder.long_distance_matching(true)?;
         encoder.window_log(27)?;
-        // bincode writes field by field; a buffer turns each write into a
+        // `bincode` writes field by field; a buffer turns each write into a
         // copy instead of a call into the compressor.
         let mut buffered = BufWriter::with_capacity(1 << 20, encoder);
         bincode::DefaultOptions::new()
@@ -500,24 +547,29 @@ pub fn save_with_progress(
     }
     std::fs::rename(&tmp, path)?;
     // Unix permits opening directories to persist the rename. Windows rejects
-    // File::open on a directory; the checkpoint file itself was synced above.
+    // `File::open` on a directory; the save file itself was synced above.
     #[cfg(unix)]
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
-/// What the start of a checkpoint says about it: enough to list a save
-/// without loading its population.
+/// What the start of a save says about it: enough to list the save without
+/// decoding its archives.
 pub struct SaveSummary {
+    /// The generation in progress when the save was taken.
     pub generation: u32,
+    /// The settings the game was running with.
     pub config: Config,
 }
-/// Reads the settings and generation at the start of a checkpoint in the
-/// current format. The payload begins with them, so only a few kilobytes are
-/// decompressed. Other formats, other physics versions and unreadable files
-/// give None.
+/// Reads the settings and generation at the start of a save, for a list of
+/// saves. The body begins with them, so only a few kilobytes are decompressed.
+/// A file in another format, a physics version that no longer loads and an
+/// unreadable file give `None`.
 pub fn summary(path: &Path) -> Option<SaveSummary> {
+    /// The first three fields of `SmallSave`. `bincode` reads fields in order,
+    /// so reading these leaves the rest of the body alone. `_pending` is read
+    /// only to get past it.
     #[derive(Deserialize)]
     struct Head {
         config: Config,
@@ -546,13 +598,18 @@ pub fn summary(path: &Path) -> Option<SaveSummary> {
         config: head.config,
     })
 }
-/// Loads the save at `path`.
+/// Loads the save at `path`. It fails with a message when the file is not a
+/// save, is in an older format, or holds a physics version that no longer
+/// loads.
 pub fn load(path: &Path) -> Result<Experiment> {
     load_with_progress(path, None)
 }
 
-/// One row per generation, in order, up to `generation`: a skipped
-/// generation gets a copy of the row before it, and a repeated one is dropped.
+/// Makes a saved history hold one row per generation, in order, with row `i`
+/// for generation `i`. A skipped generation gets a copy of the row before it,
+/// or of the next row at the start. A repeated row and a row past `generation`
+/// are dropped. A history that ends early is padded with copies of its last
+/// row, until it has `generation` rows. An empty history stays empty.
 fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
     let mut out: Vec<Stats> = Vec::with_capacity(history.len());
     for stats in history {
@@ -574,35 +631,42 @@ fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
     out
 }
 
-/// `load`, counting the file bytes read into `progress`.
+/// `load`, counting the file bytes read into `progress`, and failing once
+/// `progress` is cancelled.
 pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Experiment> {
     load_from(path, progress, false, None)
 }
 
 /// `load` for a diagnostic that continues a big save on a small machine
-/// (`examples/search_ab.rs --load`): the game runs `population` creatures per
-/// generation, so its ring is bred for that and holds no more.
+/// (`examples/search_ab.rs --load` and `examples/archive_bench.rs`): the game
+/// runs `population` creatures per generation, so its ring is bred for that
+/// and holds no more.
 #[doc(hidden)]
 pub fn load_for_population(path: &Path, population: usize) -> Result<Experiment> {
     load_from(path, None, false, Some(population))
 }
 
-/// `load` for diagnostics that only breed from the archives
-/// (`examples/breed_bench.rs`): a save of an older physics version loads
-/// too, with the scores it measured then.
+/// `load` for diagnostics that only read or breed from the archives
+/// (`examples/breed_bench.rs`, `archive_diversity`, `mutation_audit` and
+/// `body_regularity`). It does not check the physics version, so a save of an
+/// older version loads too, with the scores it measured then.
 #[doc(hidden)]
 pub fn load_any_version(path: &Path) -> Result<Experiment> {
     load_from(path, None, true, None)
 }
 
 /// `load` for diagnostics that only read the archives
-/// (`examples/island_report.rs`): the ring is one block of 64 creatures, not
-/// the saved ring, so a 3M save loads in a few hundred MB.
+/// (`examples/island_report.rs`): the ring holds 64 creatures, not the saved
+/// ring, so a 3M save loads in a few hundred MB.
 #[doc(hidden)]
 pub fn load_archives(path: &Path) -> Result<Experiment> {
     load_from(path, None, false, Some(64))
 }
 
+/// Loads a save for the functions above. `progress` counts the file bytes
+/// read. `any_version` skips the check of the physics version. `population`,
+/// when given, replaces the saved population, so the ring is bred for that
+/// size.
 fn load_from(
     path: &Path,
     progress: Option<&Progress>,
@@ -629,9 +693,9 @@ fn load_from(
         .with_context(|| format!("{} is cut short", path.display()))?;
     let saved_version = SaveHeader::from_bytes(header).qd_version;
     if !any_version {
-        ensure_current_version(path, &SaveHeader::from_bytes(header))?;
+        ensure_loadable(path, &SaveHeader::from_bytes(header))?;
     }
-    // bincode reads field by field; a buffer turns each read into a copy
+    // `bincode` reads field by field; a buffer turns each read into a copy
     // instead of a call into the decompressor (18 s to 5 s at 3M).
     let mut decoder =
         BufReader::with_capacity(1 << 20, zstd::stream::read::Decoder::with_buffer(file)?);
@@ -639,6 +703,7 @@ fn load_from(
         .with_fixint_encoding()
         .with_limit(24 * 1024 * 1024 * 1024)
         .deserialize_from(&mut decoder)?;
+    // The last migration follows `SmallSave` in the body.
     let migration: Option<(u32, Vec<(usize, usize)>)> = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(16 + 16 * island_count() as u64)
@@ -648,18 +713,23 @@ fn load_from(
         decoder.read(&mut trailing)? == 0,
         "Unexpected trailing checkpoint data"
     );
+    // An older version that still loads has its archives re-binned in
+    // `into_experiment`, so the game holds it as the current one.
     small.qd_version = qd::VERSION;
     if let Some(population) = population {
         small.config.population = population;
     }
     let mut experiment = small.into_experiment(saved_version)?;
+    // The last migration is kept only if it fits this game: no later than the
+    // saved generation, and one entry per island.
     experiment.last_migration = migration.filter(|(generation, exchange)| {
         *generation <= experiment.generation && exchange.len() == island_count()
     });
     Ok(experiment)
 }
 
-/// Writes `history` to a CSV file at `path`.
+/// Writes `history` to a CSV file at `path`, one row per generation, and
+/// creates the folder if it is missing.
 pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -700,11 +770,11 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
 }
 
 #[cfg(test)]
-mod peek_tests {
+mod summary_tests {
     use super::*;
 
     #[test]
-    fn peek_reads_the_generation_and_world_of_a_save() {
+    fn summary_reads_the_generation_and_world_of_a_save() {
         let config = Config {
             population: 64,
             random_seed: false,
@@ -727,7 +797,7 @@ mod peek_tests {
     }
 }
 #[cfg(test)]
-mod migration_tests {
+mod save_tests {
     use super::*;
 
     /// Deterministic made-up results: a distance and a behavior from each
@@ -781,7 +851,8 @@ mod migration_tests {
         let error = check(&current).unwrap_err().to_string();
         assert!(error.contains("physics version"), "{error}");
 
-        // Before the header: only the magic is read.
+        // A save from before the header (magic `EVORUST6`): the magic alone
+        // turns it down.
         let old = dir.join(format!("evolution-header-v6-{}.evo", std::process::id()));
         let mut bytes = b"EVORUST6".to_vec();
         bytes.extend([0u8; 64]);
