@@ -952,12 +952,12 @@ const NEW_PART: [Operator; 5] = [
 /// Adds a new part and fits it into the body in the same move: its muscles
 /// are timed against the gait's main driver (in phase, a quarter, a half or
 /// three quarters of a cycle later, give or take 0.03 of a cycle), half the
-/// time its joint is braced against a stop, and in four moves of ten its foot
-/// senses touchdown. A part that arrives with a random program rarely works
-/// with the gait; one that arrives timed to it has a chance. The part comes
-/// from the first of three `NEW_PART` operators, tried from a random start,
-/// that fits the body. The idlest limb tips go for the added nodes
-/// (`shed_tips`), so the body ends no bigger.
+/// time its joint is braced against a stop, and in four moves of ten the
+/// part's foot, if it has one, senses touchdown. A part that arrives with a
+/// random program rarely works with the gait; one that arrives timed to it has
+/// a chance. The part comes from the first of three `NEW_PART` operators,
+/// tried from a random start, that fits the body. The idlest limb tips go for
+/// the added nodes (`shed_tips`), so the body ends no bigger.
 pub(crate) fn grow_integrated_limb(
     c: &mut Creature,
     cfg: &Config,
