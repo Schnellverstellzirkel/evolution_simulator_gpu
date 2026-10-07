@@ -85,12 +85,9 @@ impl App {
                 )
                 .clicked()
         {
-            self.select(creature, config.clone());
+            self.select(creature, config);
             return;
         }
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            return;
-        };
         let islands = snapshot.islands.clone();
         let wild_wins = snapshot.wild_wins.clone();
         let migration = snapshot.migration.clone();
@@ -102,11 +99,11 @@ impl App {
             .id_salt("islands_grid")
             .show(ui, |ui| {
                 let main = islands.len().min(crate::qd::MAIN_ISLANDS);
-                for pair in islands[..main].chunks(2).enumerate() {
+                for (row, pair) in islands[..main].chunks(2).enumerate() {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = ISLAND_GAP;
-                        for (offset, island) in pair.1.iter().enumerate() {
-                            let index = pair.0 * 2 + offset;
+                        for (offset, island) in pair.iter().enumerate() {
+                            let index = row * 2 + offset;
                             let (rect, _) = ui.allocate_exact_size(
                                 Vec2::new(width, ISLAND_HEIGHT),
                                 Sense::hover(),
@@ -393,9 +390,9 @@ fn paint_island(
         .chain(migration_lines(migration, index, generation))
         .collect();
     let mut y = 238.;
-    for line in &lines {
+    for line in lines {
         let galley = painter.layout(
-            line.clone(),
+            line,
             FontId::proportional(14.),
             theme.muted,
             rect.width() - 24.,
@@ -432,9 +429,9 @@ fn wild_tiles(
     // For each effect, the hub cells that migrants from the wild worlds
     // holding it took (Wang et al., 2019, POET).
     let mut by_effect = vec![0u32; crate::environment::EFFECTS.len()];
-    for (w, levels) in levels.iter().enumerate() {
+    for (w, mix) in levels.iter().enumerate() {
         let won = wins.get(crate::qd::MAIN_ISLANDS + w).copied().unwrap_or(0);
-        for &(e, _) in levels {
+        for &(e, _) in mix {
             by_effect[e] += won;
         }
     }
@@ -504,9 +501,9 @@ fn wild_tiles(
                 };
                 painter.text(
                     rect.center(),
-                    egui::Align2::CENTER_CENTER,
+                    Align2::CENTER_CENTER,
                     format!("W{}\n{best}", w + 1),
-                    egui::FontId::proportional(14.),
+                    FontId::proportional(14.),
                     theme.ink,
                 );
                 let name = levels
