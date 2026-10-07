@@ -164,7 +164,9 @@ fn nursery_lines(island: &crate::worker::IslandSummary, generation: u32) -> [Str
     [first, second]
 }
 /// What an island card says about migration: the last exchange, or when the
-/// next one comes.
+/// next one comes. It covers only the copies that go to the hub. The card does
+/// not show the stepping stones, where `Experiment::step_stones` sends an elite
+/// from each isolated island to the next one.
 fn migration_lines(
     migration: Option<&crate::worker::MigrationSummary>,
     island: usize,

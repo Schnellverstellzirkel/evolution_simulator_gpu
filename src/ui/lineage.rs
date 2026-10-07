@@ -1,8 +1,8 @@
 //! The Lineage tab. It lists the recorded ancestors of the creature on screen
-//! as tiles, newest first, and marks the tiles where the body plan changed. A
-//! click on a tile replays that ancestor in the world of its generation and
-//! goes back to the Overview. The worker traces the chain when `App` sends
-//! `Command::Lineage`.
+//! as tiles, newest first, and a tile says "Body plan" when its numbers of
+//! nodes, bones or muscles differ from its parent's. A click on a tile replays
+//! that ancestor in the world of its generation and goes back to the Overview.
+//! The worker traces the chain when `App` sends `Command::Lineage`.
 
 use super::{App, Tab, scene::thumbnail, text::species_name};
 use crate::{
@@ -113,11 +113,11 @@ fn body_plan_changed(
 /// Paints one ancestor tile of size `size`: its thumbnail, generation,
 /// distance, gain over its parent and species name. `parent` is the next older
 /// ancestor in the list. The tile says "selected" when `current` is set, which
-/// is the creature on screen, and "Body plan" when its body plan differs from
-/// `parent`'s. Its outline is lit for those two and under the pointer. The
-/// hover text gives the counts of nodes, bones and muscles, what changed from
-/// the parent, and the parent's generation and distance. Returns whether the
-/// player clicked the tile.
+/// is the creature on screen, and "Body plan" when `body_plan_changed` is true.
+/// Its outline is lit for those two and under the pointer. The hover text
+/// repeats the numbers and adds the counts of nodes, bones and muscles, what
+/// changed from the parent, and the parent's generation and distance. Returns
+/// whether the player clicked the tile.
 fn paint_lineage_tile(
     ui: &mut egui::Ui,
     step: &crate::worker::LineageStep,
