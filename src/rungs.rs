@@ -555,7 +555,7 @@ impl Audit {
         if let Some(rules) = in_force {
             self.judge(&rules, &rows, &mut report);
         }
-        self.trial(&rows);
+        self.judge_fitted(&rows);
         self.window.push_back(GenAudit::of(&rows));
         while self.window.len() > WINDOW {
             self.window.pop_front();
@@ -577,7 +577,7 @@ impl Audit {
     /// the 5 s screen would have kept and on the creatures that reach the 5 s
     /// bar. It keeps the last `JUDGED` judgments for `trusted`, and drops them
     /// while the window fits no rule.
-    fn trial(&mut self, rows: &[AuditRow]) {
+    fn judge_fitted(&mut self, rows: &[AuditRow]) {
         for r in 0..RUNGS {
             let Some(rung) = self.fit_rung(r) else {
                 self.judged[r].clear();
@@ -760,9 +760,9 @@ impl Audit {
         }
         // A small multiple of the mean variance on the diagonal keeps it
         // invertible.
-        let trace: f64 = (0..FEATURES).map(|i| s[i][i]).sum::<f64>() / FEATURES as f64;
+        let mean_variance: f64 = (0..FEATURES).map(|i| s[i][i]).sum::<f64>() / FEATURES as f64;
         for (i, row) in s.iter_mut().enumerate() {
-            row[i] += 1e-9 * trace.max(1e-12);
+            row[i] += 1e-9 * mean_variance.max(1e-12);
         }
         // Fisher's direction: the inverse covariance times the difference of
         // the class means, scaled so that the largest weight has magnitude 1.
