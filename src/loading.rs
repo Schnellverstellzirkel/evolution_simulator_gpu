@@ -1,13 +1,8 @@
 //! What the game is waiting for while it starts: devices opening and GPU
-//! kernels compiling. Engines report here from any thread, and the window
-//! reads it to draw the loading screen (`ui/loading.rs`). Nothing here
-//! affects evaluation.
-//!
-//! A job is a device opening or one kernel build. It is queued, then running,
-//! then done, and it belongs to one group: `Startup` (what the loading screen
-//! waits for), `Needed` (a kernel that evolution waits for now, such as a new
-//! world after a button press) or `Idle` (a neighbouring world compiled at
-//! the lowest priority, which nobody waits for).
+//! kernels compiling. Engines report each job here from any thread, and the
+//! window reads the registry to draw the loading screen (`ui/loading.rs`).
+//! A job is queued, then running, then done, and it belongs to one `Group`.
+//! Nothing here affects evaluation.
 
 use std::sync::{
     Mutex,
@@ -15,33 +10,48 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+/// Who waits for a job.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// What the loading screen waits for when the game starts: the devices
+    /// and the kernels of the worlds the game begins with.
     Startup,
+    /// A kernel that evolution waits for now, such as a new world after a
+    /// button press.
     Needed,
+    /// A kernel of a world one effect level away from the current one. It is
+    /// compiled at the lowest priority, for a later button press. Nobody waits
+    /// for it, and the window does not show it.
     Idle,
 }
 
+/// Where a job is in its life.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum State {
+    /// Waiting for a thread.
     Queued,
+    /// Running since this moment.
     Running(Instant),
-    /// Finished after this long, at this moment; `true` when it came from
-    /// the disk cache and not from a compiler.
+    /// Finished. The fields are how long it took, whether it came from the
+    /// disk cache and not from a compiler, and the moment it finished.
     Done(Duration, bool, Instant),
 }
 
-/// A tracked job: device opening or kernel build.
+/// A tracked job: a device opening or a kernel build.
 #[derive(Clone, Debug)]
 struct Job {
+    /// Names the job. A report with a label that is already known is about
+    /// that job.
     label: String,
     group: Group,
     state: State,
 }
 
 struct Registry {
+    /// In the order of their first report. Finished jobs stay, so the screen
+    /// can count them.
     jobs: Vec<Job>,
-    /// When the first job of the first wave was queued or started.
+    /// When the first job was queued or started.
     since: Option<Instant>,
 }
 
@@ -50,13 +60,18 @@ static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
     since: None,
 });
 
-/// While true, jobs queued without a group belong to `Group::Startup`.
+/// While true, `queued` puts every job that is not `Idle` in `Group::Startup`.
 static STARTUP: AtomicBool = AtomicBool::new(false);
 
+/// Runs `f` on the registry with its lock held. A lock poisoned by a panic on
+/// another thread is used as it is.
 fn with<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
     f(&mut REGISTRY.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// Records `state` for the job named `label`, and adds the job if it is new.
+/// A new job with no `group` joins `Group::Needed`. A known job keeps its
+/// group, except that an `Idle` one moves to a `group` that is not `Idle`.
 fn set(label: &str, group: Option<Group>, state: State) {
     with(|r| {
         if r.since.is_none() && !matches!(state, State::Done(..)) {
@@ -86,21 +101,21 @@ fn set(label: &str, group: Option<Group>, state: State) {
     })
 }
 
-/// Marks the jobs queued from now until `end_startup` as part of the startup
-/// the loading screen waits for. Engines call it around the prefetch of the
-/// worlds the game begins with.
+/// From now until `end_startup`, `queued` puts every job that is not `Idle` in
+/// `Group::Startup`, which the loading screen waits for. The CUDA engine calls
+/// it around the prefetch of the worlds the game begins with.
 pub fn begin_startup() {
     STARTUP.store(true, Ordering::Relaxed);
 }
 
-/// Ends the window opened by `begin_startup`.
+/// Ends the span that `begin_startup` began.
 pub fn end_startup() {
     STARTUP.store(false, Ordering::Relaxed);
 }
 
-/// A job that will run later, such as a kernel a background compiler has
-/// queued. With `begin_startup` in force it belongs to the startup group
-/// unless `group` is `Idle`.
+/// Reports a job that will run later, such as a kernel a background compiler
+/// has queued. While `begin_startup` is in force it joins `Group::Startup`
+/// unless `group` is `Idle`. A job that is already finished stays finished.
 pub fn queued(label: &str, group: Group) {
     let group = if STARTUP.load(Ordering::Relaxed) && group != Group::Idle {
         Group::Startup
@@ -110,13 +125,15 @@ pub fn queued(label: &str, group: Group) {
     set(label, Some(group), State::Queued);
 }
 
-/// A job starting now. Mark it done with `Task::finish`; a task dropped
-/// without that (an error) is removed.
+/// Reports a job that starts now. Mark it done with `Task::finish`. A task
+/// dropped without that, as after an error, removes the job. A job that was
+/// queued keeps its group, and a job that was not joins `Group::Needed`.
 pub fn start(label: impl Into<String>) -> Task {
     start_in(label, None)
 }
 
-/// `start` for a job of a given group.
+/// `start` with a group. A new job joins `group`. A job queued as `Idle` moves
+/// to `group` unless that is `Idle` too. With `None` it is the same as `start`.
 pub fn start_in(label: impl Into<String>, group: Option<Group>) -> Task {
     let label = label.into();
     set(&label, group, State::Running(Instant::now()));
@@ -127,7 +144,8 @@ pub fn start_in(label: impl Into<String>, group: Option<Group>) -> Task {
     }
 }
 
-/// Forgets a queued job nobody will run (the engine closed).
+/// Forgets the job `label` unless it is finished. The CUDA engine calls it for
+/// each kernel still queued when the engine closes, because nobody will run it.
 pub fn cancel(label: &str) {
     with(|r| {
         r.jobs
@@ -144,7 +162,8 @@ pub struct Task {
 }
 
 impl Task {
-    /// Marks the job done. `cached` says it was loaded rather than built.
+    /// Marks the job done. `cached` says it came from the disk cache and not
+    /// from a compiler.
     pub fn finish(mut self, cached: bool) {
         self.finished = true;
         set(
@@ -164,7 +183,7 @@ impl Drop for Task {
     }
 }
 
-/// What a loading screen or a note shows for one group of jobs.
+/// What the loading screen or the corner note shows for one group of jobs.
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
     /// Jobs running now, with how long each has run, longest first.
@@ -175,11 +194,13 @@ pub struct Progress {
     pub done: usize,
     /// Of `done`, how many came from the disk cache.
     pub cached: usize,
-    /// The most recently finished job and how long it took.
+    /// The job that finished last: its label, how long it took and whether it
+    /// came from the disk cache.
     pub last: Option<(String, Duration, bool)>,
-    /// Time since the first job of the game began.
+    /// Time since the first job of any group was queued or started.
     pub elapsed: Duration,
-    /// Seconds each finished build (not cache read) took.
+    /// Seconds each finished job took, apart from the jobs read from the disk
+    /// cache.
     pub built_seconds: Vec<f32>,
 }
 
@@ -194,8 +215,11 @@ impl Progress {
         !self.running.is_empty() || self.queued > 0
     }
 
-    /// Seconds until the rest finish, from the builds seen so far, spread
-    /// over the jobs that run at once. None before a build has finished.
+    /// Seconds until the rest finish, estimated from the mean of
+    /// `built_seconds`. A running job needs the mean less the time it has run,
+    /// but not less than half a second. A waiting job needs the mean. The sum
+    /// is spread over the jobs that run at once. It is `None` before a build
+    /// has finished and when no job is left.
     pub fn seconds_left(&self) -> Option<f32> {
         if self.built_seconds.is_empty() || !self.busy() {
             return None;
@@ -211,7 +235,8 @@ impl Progress {
     }
 }
 
-/// The state of one group, for drawing.
+/// Counts the jobs of `group` by state and lists the running ones, for
+/// drawing.
 pub fn progress(group: Group) -> Progress {
     with(|r| {
         let now = Instant::now();
@@ -247,8 +272,9 @@ pub fn progress(group: Group) -> Progress {
     })
 }
 
-/// Fills the registry with made-up jobs for a screenshot run
-/// (`EVOLUTION_SMOKE_LOADING`): some done, a few running, many queued.
+/// Replaces the registry with made-up `Startup` jobs for a screenshot run
+/// (`EVOLUTION_SMOKE_LOADING`): some done, a few running, many queued. The
+/// game seems to have begun 41 s ago.
 pub fn demo() {
     with(|r| {
         r.jobs.clear();
@@ -265,6 +291,9 @@ pub fn demo() {
             "Slope + Air drag",
         ];
         for (w, world) in worlds.iter().enumerate() {
+            // Four jobs a world, as when a kernel came in four lane classes.
+            // The label no longer names the class, so the loop value only
+            // picks the place of the job among the states.
             for class in [4u32, 8, 16, 32] {
                 let n = w * 4 + class.ilog2() as usize - 2;
                 let state = if n < 13 {
