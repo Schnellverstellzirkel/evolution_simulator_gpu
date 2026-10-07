@@ -1,16 +1,27 @@
+//! `Experiment::breed_block` fills a block of the ring from the archives,
+//! after `absorb` takes the block's results and when a save loads.
+//! `plan_offspring` picks each child's emitter, parent, mate and CMA emitter.
+//! Reseeded elites and the children of the refuge, the founder bank, the hall
+//! of fame and the hub's pen take their slots first, and `Population::breed`
+//! breeds the other slots. The breeding timers that the stage log reads live
+//! here too.
 use super::*;
 
-/// Nanoseconds of breeding spent planning, emitting offspring, and writing
-/// them into their block, since the last `take_breed_nanos`.
+/// Nanoseconds of breeding since the last `take_breed_nanos`. Slot 0 is
+/// planning. Slot 1 is the rest of `breed_block`: emitting the children and
+/// writing them into their block. Slot 2 is for writing alone and stays 0,
+/// because children are written as they are bred.
 pub static BREED_NANOS: [std::sync::atomic::AtomicU64; 3] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 3];
-/// Returns and clears the breeding timers.
+/// Returns the breeding timers (planning, emitting, writing) in nanoseconds
+/// and clears them.
 pub fn take_breed_nanos() -> [u64; 3] {
     std::array::from_fn(|i| BREED_NANOS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
 }
-/// Children written after their part of the block's arena (low 32 bits)
-/// and blocks bred into a new arena because the old one was still shared
-/// (high 32 bits), since the last `take_breed_late`.
+/// Children written after all parts of the block's arena, because they did
+/// not fit their own part (low 32 bits), and blocks bred into a new arena
+/// because the old one was still shared (high 32 bits), since the last
+/// `take_breed_late`.
 pub static BREED_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Returns and clears `BREED_LATE` as (late children, new arenas).
 pub fn take_breed_late() -> (u64, u64) {
@@ -18,15 +29,18 @@ pub fn take_breed_late() -> (u64, u64) {
     (v & 0xffff_ffff, v >> 32)
 }
 
-/// Share of the structural and novelty children of a reshaped nursery that
-/// take a limb from a body of another plan (a hybrid; Arnold, 1997).
+/// `CROSS_PLAN_MATE_SHARE` for the structural and novelty children of a
+/// reshaped nursery: the chance of drawing a mate to take a limb from (a
+/// hybrid; Arnold, 1997). The mate counts only if its body plan differs from
+/// the parent's.
 const RESHAPED_CROSS_SHARE: f32 = 0.3;
 
-/// The emitter mix of `island`: each isolated island leans a few points
-/// toward one emitter, so the islands develop different habits (Whitley,
-/// 1999). The hub, the wild islands and the nurseries keep the mix.
+/// The emitter weights of `island`. Each isolated island moves up to five
+/// points of weight from one emitter to another, so the islands develop
+/// different habits (Whitley, 1999). The hub, the wild islands and the
+/// nurseries keep `weights` as they are.
 fn island_weights(weights: &[f64; qd::EMITTER_COUNT], island: usize) -> [f64; qd::EMITTER_COUNT] {
-    // (from, to): five points move from one emitter to another.
+    // (from, to): up to five points move from one emitter to the other.
     let lean = match island {
         0 => Some((Emitter::Structural, Emitter::Cma)),
         1 => Some((Emitter::Novelty, Emitter::Structural)),
@@ -43,20 +57,26 @@ fn island_weights(weights: &[f64; qd::EMITTER_COUNT], island: usize) -> [f64; qd
     out
 }
 
-/// Share of CMA offspring whose parent is one of its island's fastest 1% of
-/// elites; the rest sample by local competition. Spending more on the best
-/// elites raised the best distance by about half in fixed-seed tests.
+/// Share of CMA offspring whose parent is one of their island's top elites
+/// (`top_parents`) or the target of an island optimizer (`OPTIMIZER_SHARE`).
+/// The rest sample by local competition. In the fixed-seed tests that added
+/// this share, the best distance rose by about half.
 const TOP_PARENT_SHARE: f32 = 0.5;
-/// Share of structural and novelty children that graft a limb from an elite
-/// with a different body plan.
+/// Chance that a structural or novelty child without a mate of its own body
+/// plan draws a mate to graft a limb from. The mate counts only if its body
+/// plan differs from the parent's. A reshaped nursery uses
+/// `RESHAPED_CROSS_SHARE` instead.
 const CROSS_PLAN_MATE_SHARE: f32 = 0.15;
 /// Share of those top-elite CMA offspring bred by an island optimizer
-/// (separable CMA-ES in physical units) on one of its fastest designs.
+/// (separable CMA-ES in physical units), on one of the island's fastest
+/// designs or on the fastest elite of its rarest clade.
 const OPTIMIZER_SHARE: f32 = 0.5;
 /// How many of an island's fastest elites the breeding plan ranks.
 const FASTEST_ELITES: usize = 512;
 
-/// Planned offspring for one breeding slot before CMA slots are assigned.
+/// The plan for one offspring, as `plan_offspring` returns it: the
+/// `CandidatePlan` that `Population::breed` follows, and what the child's
+/// `Birth` records about its parent and its protection.
 struct OffspringPlan {
     plan: CandidatePlan,
     parent_id: Option<u64>,
