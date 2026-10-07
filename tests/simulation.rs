@@ -2,7 +2,7 @@ use evolution_simulator::{
     config::Config,
     evolution::{self, Creature, Muscle},
     physics,
-    qd::{Elite, Emitter, QdArchive},
+    qd::{Elite, Emitter, EvaluationMetrics, QdArchive},
     storage::{self, Experiment},
 };
 use std::path::PathBuf;
@@ -15,14 +15,11 @@ fn config() -> Config {
     }
 }
 /// Made-up standard results: the score grows with the birth slot.
-fn by_slot(
-    pop: &evolution::Population,
-    _: &Config,
-) -> anyhow::Result<Vec<evolution_simulator::qd::EvaluationMetrics>> {
+fn by_slot(pop: &evolution::Population, _: &Config) -> anyhow::Result<Vec<EvaluationMetrics>> {
     Ok(pop
         .genomes
         .iter()
-        .map(|g| evolution_simulator::qd::EvaluationMetrics {
+        .map(|g| EvaluationMetrics {
             fitness: evolution::slot_of_id(g.id) as f32 * 0.1,
             ..Default::default()
         })
@@ -57,7 +54,7 @@ fn assert_genomes_close(a: &Creature, b: &Creature) {
     let close = |x: f32, y: f32| (x - y).abs() <= 1e-4;
     assert_eq!(a.nodes.len(), b.nodes.len());
     for (x, y) in a.nodes.iter().zip(&b.nodes) {
-        assert!((x.x - y.x).abs() <= 1e-4 && (x.y - y.y).abs() <= 1e-4);
+        assert!(close(x.x, y.x) && close(x.y, y.y));
         assert!(close(x.diameter, y.diameter) && close(x.friction, y.friction));
     }
     assert_eq!(a.bones.len(), b.bones.len());
