@@ -773,6 +773,8 @@ fn print_robustness(
         unit.push(creature);
     }
     let standard = physics::Fidelity::standard();
+    // TODO: also set `rungs: None`. An elite re-test runs a full trial, and an
+    // armed rung of the experiment can stop this one early.
     let cfg = Config {
         fidelity: Some(physics::Fidelity {
             rate: standard.rate * 4,
