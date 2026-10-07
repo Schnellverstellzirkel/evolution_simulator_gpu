@@ -181,10 +181,10 @@ pub(crate) fn lengthen_lower_leg(
 
 /// Gives a leg of two or more bones an ankle: the last 20 to 40% of the last
 /// bone becomes a foot segment on its own joint. A new muscle across the ankle
-/// takes the timing of the leg's strongest muscle (`leg_template`) with its
-/// phase raised by 0.25. A leg with an ankle can keep the foot flat on the
-/// ground while the shank swings over it. The last bone must be at least 0.1
-/// long, and the body needs room for a node and a muscle.
+/// takes the timing of the leg's strongest muscle (`leg_template`), with its
+/// phase and touchdown reset raised by 0.25. A leg with an ankle can keep the
+/// foot flat on the ground while the shank swings over it. The last bone must
+/// be at least 0.1 long, and the body needs room for a node and a muscle.
 pub(crate) fn add_ankle_joint(
     c: &mut Creature,
     cfg: &Config,
@@ -222,11 +222,11 @@ pub(crate) fn add_ankle_joint(
 /// Bends a leg of one straight bone near its middle: the bone is cut at 40 to
 /// 60% of its length into a thigh and a shank, and the knee between them sticks
 /// out sideways by 12 to 30% of the length. A new muscle across the knee takes
-/// the timing of the leg's strongest muscle (`leg_template`) with its phase
-/// raised by 0.25. Sims (1994) and Lipson and Pollack (2000) got their walkers
-/// from jointed legs, and a bent leg can shorten in the swing and extend in the
-/// stance, which a straight stick cannot. The bone must be at least 0.14 long,
-/// and the body needs room for a node and a muscle.
+/// the timing of the leg's strongest muscle (`leg_template`), with its phase
+/// and touchdown reset raised by 0.25. Sims (1994) and Lipson and Pollack
+/// (2000) got their walkers from jointed legs, and a bent leg can shorten in
+/// the swing and extend in the stance, which a straight stick cannot. The bone
+/// must be at least 0.14 long, and the body needs room for a node and a muscle.
 pub(crate) fn bend_stick_leg_at_knee(
     c: &mut Creature,
     cfg: &Config,
@@ -496,10 +496,10 @@ pub(crate) fn tendon_the_ankle(
 /// Grows a foot onto the tip of a leg of two or more bones: one short bone,
 /// 30 to 60% of the last one and 0.04 to 0.4 long, pointing forward and down by
 /// up to 0.6 rad. A new muscle across the ankle takes the timing of the leg's
-/// strongest muscle (`leg_template`) with its phase raised by 0.25. The foot
-/// gives the leg a toe to push off and a lever for the stance. Its tip is the
-/// leg's new end, and the idlest tip elsewhere goes back. The operator refuses
-/// when no other tip can go.
+/// strongest muscle (`leg_template`), with its phase and touchdown reset raised
+/// by 0.25. The foot gives the leg a toe to push off and a lever for the
+/// stance. Its tip is the leg's new end, and the idlest tip elsewhere goes
+/// back. The operator refuses when no other tip can go.
 pub(crate) fn grow_forward_foot(
     c: &mut Creature,
     cfg: &Config,
