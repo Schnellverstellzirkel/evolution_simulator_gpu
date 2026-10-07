@@ -1,21 +1,10 @@
-//! A pause that developers ask for from outside the game, so a speed
-//! measurement gets the GPU and the CPU to itself while the owner's game
-//! keeps its run.
-//!
-//! A tool (`tools/pause-game.sh`) writes the request file `pause` in
-//! [`dir`]. The game notices it within about a second, stops handing out new
-//! evaluation work, lets the units on the engines finish and be absorbed,
-//! closes its GPU engines (freeing their memory) and writes the
-//! acknowledgement file `paused` with its pid. It resumes when the request
-//! file goes away, when the player presses Resume now, or [`LONGEST`] after
-//! the pause began, whichever comes first. After a pause the game runs at
-//! least [`REST`] before it honors a new request, and it never honors the
-//! same request twice, so a request file left behind cannot pause it again.
-//! While it waits out the rest it writes `waiting` with the time it will
-//! honor the request.
-//!
-//! The search is unchanged by a pause: work is held back, never dropped,
-//! so the run continues as if the GPU had been slow for a while.
+//! This module lets a developer pause the running game from outside, so a
+//! speed measurement gets the GPU and the CPU to itself. `tools/pause-game.sh`
+//! writes the request file, and `DevPause` on the worker thread reads it,
+//! suspends the scheduler and closes the GPU engines. `Controller` holds the
+//! rules for when a pause starts and ends, and `Shared` carries the pause to
+//! the UI. A pause holds work back and never drops it, so it does not change
+//! the search.
 
 use crate::scheduler::Scheduler;
 use std::{
@@ -27,16 +16,18 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// The longest a pause lasts.
+/// The longest a pause lasts, counted from when it began.
+/// `tools/pause-game.sh` repeats this value.
 pub const LONGEST: Duration = Duration::from_secs(5 * 60);
 /// How long the game runs after a pause before it honors a new request.
 pub const REST: Duration = Duration::from_secs(2 * 60);
-/// How often the game looks for the request file.
+/// The shortest time between two looks at the request file.
 const POLL: Duration = Duration::from_millis(250);
 
-/// Where the request and acknowledgement files live:
+/// The directory of the pause files `pause`, `paused` and `waiting`. It is
 /// `$XDG_RUNTIME_DIR/evolution-simulator`, or
-/// `<temp>/evolution-simulator-<uid>` without a runtime directory.
+/// `<temp>/evolution-simulator-<uid>` when there is no runtime directory.
+/// `tools/pause-game.sh` builds the same path.
 pub fn dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         Some(runtime) => PathBuf::from(runtime).join("evolution-simulator"),
@@ -60,14 +51,18 @@ fn user_id() -> u32 {
 pub struct View {
     /// When the pause ends at the latest.
     pub ends_at: Instant,
-    /// The engines are closed; false while the last units finish.
+    /// True once the engines are closed. It is false while the last units
+    /// finish.
     pub closed: bool,
 }
 
 /// State the worker shares with the UI.
 #[derive(Default)]
 pub struct Shared {
+    /// The pause on now. The worker sets it and the UI reads it.
     view: Mutex<Option<View>>,
+    /// Set when the player presses Resume now. The worker clears it when it
+    /// reads it.
     resume: AtomicBool,
 }
 
@@ -76,7 +71,8 @@ impl Shared {
     pub fn view(&self) -> Option<View> {
         *self.view.lock().unwrap_or_else(|e| e.into_inner())
     }
-    /// The player's Resume now button.
+    /// The player's Resume now button. The worker ends the pause on its next
+    /// tick. A press while no pause is on does nothing.
     pub fn resume_now(&self) {
         self.resume.store(true, Ordering::Relaxed);
     }
@@ -86,17 +82,27 @@ impl Shared {
 }
 
 /// Decides when the game is paused, from the request it sees and the clock.
+///
+/// A request that was not honored before starts a pause, unless the game is
+/// resting after the last one. A pause ends when the request goes away, when
+/// the player presses Resume now or when `longest` has passed since it began.
+/// Then the game rests for `rest` before it honors a new request.
 #[derive(Debug)]
 pub struct Controller {
     longest: Duration,
     rest: Duration,
+    /// When the pause on now began, or `None` when no pause is on.
     started: Option<Instant>,
+    /// When the last pause ended, or `None` before the first one ends.
     ended: Option<Instant>,
-    /// The last request honored; the same request is not honored again.
+    /// The last request honored. The same request is never honored again.
     served: Option<String>,
 }
 
 impl Controller {
+    /// A controller that has not paused yet. A pause lasts at most `longest`,
+    /// and the game runs at least `rest` after one before it honors a new
+    /// request.
     pub fn new(longest: Duration, rest: Duration) -> Self {
         Self {
             longest,
@@ -107,9 +113,10 @@ impl Controller {
         }
     }
 
-    /// Whether the game should be paused at `now`. `request` identifies the
-    /// request file present (None when there is none); `resume` is the
-    /// player's Resume now.
+    /// Whether the game should be paused at `now`. This also starts and ends
+    /// the pause. `request` identifies the request file that is present, or is
+    /// `None` when there is none. `resume` is true when the player pressed
+    /// Resume now.
     pub fn update(&mut self, now: Instant, request: Option<&str>, resume: bool) -> bool {
         if let Some(started) = self.started {
             if resume || request.is_none() || now.duration_since(started) >= self.longest {
@@ -129,15 +136,17 @@ impl Controller {
         }
     }
 
-    /// While the game rests after a pause, how long until it honors a
-    /// request again.
+    /// How much of the rest is left after the last pause. It is `None` before
+    /// the first pause, during a pause and once the rest is over.
     pub fn waiting(&self, now: Instant) -> Option<Duration> {
         let ended = self.ended?;
         let rested = now.duration_since(ended);
         (self.started.is_none() && rested < self.rest).then(|| self.rest - rested)
     }
 
-    /// Whether `request` is new and waits for the rest to end.
+    /// How long a new `request` still waits for the rest to end. It is `None`
+    /// when there is no request, when the request was honored before and when
+    /// the game is not resting.
     fn deferred(&self, now: Instant, request: Option<&str>) -> Option<Duration> {
         let request = request?;
         if self.served.as_deref() == Some(request) {
@@ -146,39 +155,58 @@ impl Controller {
         self.waiting(now)
     }
 
-    /// When the current pause ends at the latest.
+    /// When the current pause ends at the latest, or `None` when no pause is
+    /// on.
     pub fn ends_at(&self) -> Option<Instant> {
         self.started.map(|started| started + self.longest)
     }
 }
 
+/// Where the worker is in a pause.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
+    /// No pause is on.
     Running,
-    /// No new work goes out; the units on the engines finish.
+    /// No new work goes out. The units on the engines finish.
     Holding,
     /// The engines are closed.
     Closed,
 }
 
-/// The worker's side of the pause: watches the request file, suspends and
-/// resumes the scheduler, and writes the acknowledgement.
+/// The worker's side of the pause. It watches the request file, suspends and
+/// resumes the scheduler, and writes the acknowledgement files.
+///
+/// A tool writes the request file `pause` in the pause directory. The worker
+/// stops handing out new evaluation work and lets the units on the engines
+/// finish. Then it closes the GPU engines, which frees their memory, and
+/// writes `paused` with its pid. It removes `paused` when the pause ends.
+/// While a new request waits for the rest to end, it writes `waiting` with the
+/// time it will honor the request.
 pub struct DevPause {
+    /// Where the pause files live. The game uses `dir()`.
     dir: PathBuf,
     shared: Arc<Shared>,
     controller: Controller,
     phase: Phase,
+    /// When the request file was last read.
     last_poll: Option<Instant>,
+    /// The identity of the request file at the last read, or `None` when
+    /// there was none.
     request: Option<String>,
     /// Whether the `waiting` file has been written.
     waiting_written: bool,
 }
 
 impl DevPause {
+    /// A pause watcher for the request file in `dir`, with the limits
+    /// `LONGEST` and `REST`. The UI reads the pause from `shared` and presses
+    /// Resume now there.
     pub fn new(dir: PathBuf, shared: Arc<Shared>) -> Self {
         Self::with_limits(dir, shared, LONGEST, REST)
     }
 
+    /// Like `new`, with a pause of at most `longest` and a rest of at least
+    /// `rest`. The tests use short limits.
     pub fn with_limits(
         dir: PathBuf,
         shared: Arc<Shared>,
@@ -196,19 +224,20 @@ impl DevPause {
         }
     }
 
-    /// True while the scheduler is suspended.
+    /// True while a pause is on. The scheduler is suspended then.
     pub fn holding(&self) -> bool {
         self.phase != Phase::Running
     }
 
-    /// True once the engines are closed and nothing is left to collect: the
-    /// worker may sleep between commands.
+    /// True once the engines are closed and nothing is left to collect. Then
+    /// the worker may sleep between commands.
     pub fn idle(&self) -> bool {
         self.phase == Phase::Closed
     }
 
-    /// Looks at the request and the clock and moves the pause along.
-    /// Returns a message for the event log when the pause starts or ends.
+    /// Looks at the request and the clock and moves the pause along. `sched`
+    /// is the scheduler to suspend and resume, or `None` when the worker has
+    /// none. Returns a message for the event log when the pause starts or ends.
     pub fn tick(&mut self, sched: Option<&mut Scheduler>) -> Option<String> {
         let now = Instant::now();
         if self
@@ -223,6 +252,7 @@ impl DevPause {
         self.write_waiting(self.controller.deferred(now, self.request.as_deref()));
         let mut message = None;
         match (pause, self.phase, sched) {
+            // The pause starts: no new work goes out.
             (true, Phase::Running, sched) => {
                 if let Some(sched) = sched {
                     sched.suspend();
@@ -231,6 +261,8 @@ impl DevPause {
                 self.publish();
                 message = Some("Paused for a developer measurement.".to_owned());
             }
+            // Close the engines once they hold no work. Without a scheduler
+            // there is nothing to wait for.
             (true, Phase::Holding, sched) => {
                 if sched.is_none_or(|sched| sched.close_idle_engines()) {
                     self.phase = Phase::Closed;
@@ -238,8 +270,12 @@ impl DevPause {
                     self.write_ack();
                 }
             }
+            // The engines stay closed until the pause ends.
             (true, Phase::Closed, _) => {}
+            // No pause is on and none starts.
             (false, Phase::Running, _) => {}
+            // The pause ends: the scheduler resumes and opens the engines
+            // again.
             (false, _, sched) => {
                 let why = if resume {
                     "the player resumed"
@@ -260,6 +296,7 @@ impl DevPause {
         message
     }
 
+    /// Hands the UI the pause that is on, or `None` when the game runs.
     fn publish(&self) {
         let view = (self.phase != Phase::Running)
             .then(|| self.controller.ends_at())
@@ -271,6 +308,9 @@ impl DevPause {
         self.shared.set(view);
     }
 
+    /// Writes the acknowledgement file `paused`. It holds the game's pid, the
+    /// Unix time the engines closed (`since`) and the Unix time the pause ends
+    /// at the latest (`resumes_by`).
     fn write_ack(&self) {
         let now = unix_seconds(SystemTime::now());
         let left = self.controller.ends_at().map_or(0, |end| {
@@ -286,6 +326,10 @@ impl DevPause {
         );
     }
 
+    /// Writes the file `waiting` when a new request starts to wait for the
+    /// rest to end, and removes it when the wait is over. `wait` is the time
+    /// left, from `Controller::deferred`. The file holds the game's pid and
+    /// the Unix time it will honor the request (`honors_at`).
     fn write_waiting(&mut self, wait: Option<Duration>) {
         match wait {
             Some(wait) if !self.waiting_written => {
@@ -307,7 +351,8 @@ impl DevPause {
 
 impl Drop for DevPause {
     fn drop(&mut self) {
-        // Leave no acknowledgement behind for a game that has quit.
+        // Leave no acknowledgement or waiting file behind for a game that has
+        // quit.
         if self.phase == Phase::Closed {
             let _ = std::fs::remove_file(self.dir.join("paused"));
         }
@@ -317,8 +362,8 @@ impl Drop for DevPause {
     }
 }
 
-/// The request's identity: its modification time and contents, or None when
-/// there is no request.
+/// The request's identity: its modification time and contents, or `None` when
+/// there is no request. A file written again is a new request.
 fn read_request(dir: &Path) -> Option<String> {
     let path = dir.join("pause");
     let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
@@ -333,8 +378,8 @@ fn unix_seconds(at: SystemTime) -> u64 {
     at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Writes `contents` through a temporary file and a rename, so a reader never
-/// sees half a file.
+/// Writes `contents` to `path` through a temporary file and a rename, so a
+/// reader never sees half a file. It creates the directory and ignores errors.
 fn write_file(path: &Path, contents: &str) {
     let Some(dir) = path.parent() else {
         return;
