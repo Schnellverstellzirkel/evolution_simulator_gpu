@@ -216,7 +216,7 @@ impl Model {
         let (mut lo, mut hi) = (Vec::new(), Vec::new());
         for (j, b) in c.bones.iter().enumerate() {
             // A bone at the head other than the neck turns against the neck,
-            // as its joint does in the current physics (`physics::joints`).
+            // as `physics::joint_reference` has it.
             let up = parent_of_node[b.a as usize].or((j > 0).then_some(0));
             parent.push(up);
             let relative = match up {
@@ -234,6 +234,8 @@ impl Model {
             .map(|m| {
                 let ba = c.bones[m.bone_a as usize];
                 let bb = c.bones[m.bone_b as usize];
+                // The four attachment nodes, in the order of the gene's
+                // `sensor`.
                 let ends = [ba.a, ba.b, bb.a, bb.b];
                 MuscleModel {
                     bone_a: m.bone_a as usize,
@@ -246,6 +248,8 @@ impl Model {
                         0.0
                     },
                     long: physics::slack_length(&c.bones, &nodes, m),
+                    // `tendon_k` and `strength` are set below, once the
+                    // masses the muscles drive are known.
                     tendon_k: 0.0,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
@@ -266,6 +270,8 @@ impl Model {
             .collect();
         // Muscle strength follows the mass a muscle drives: the lighter of the
         // two subtrees (a bone with everything it carries) it pulls together.
+        // `subtree[j]` is that mass for bone `j`. The neck also carries the
+        // head.
         let mut muscles: Vec<MuscleModel> = muscles;
         let mut subtree: Vec<f32> = (0..c.bones.len())
             .map(|j| nodes[order[j + 1]].mass + if j == 0 { nodes[order[0]].mass } else { 0.0 })
@@ -300,13 +306,15 @@ impl Model {
             let sharing = groups.iter().filter(|&&g| g == key).count().max(1) as f32;
             m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0) / sharing;
             // The tendon reaches the muscle's force cap when stretched by
-            // `TENDON_STRETCH` of its longest length (at the stiffest gene).
+            // `TENDON_STRETCH` of its slack length, at the stiffest gene
+            // (tendon 1).
             m.tendon_k = gene.tendon * limits.muscle_force * m.strength
                 / (crate::evolution::TENDON_STRETCH * m.long.max(0.05));
         }
         let quake = crate::physics::quake_hash(c.id);
+        // No earthquake bumps: the quake level is 0 or there is no ground.
         let still = cfg.quake <= 0.0 || !cfg.ground;
-        // Muscle strength over the fixed limits; 1 for every body today.
+        // A further factor on each muscle's strength. It is 1 for every body.
         let muscle_scale = 1.0;
         Model {
             mass: order.iter().map(|&i| nodes[i].mass).collect(),
@@ -341,7 +349,8 @@ impl Model {
         }
     }
 
-    /// The ground's height and slope under `x`.
+    /// The height and slope of this creature's ground under `x`. With no
+    /// ground the height is minus infinity.
     fn ground(&self, x: f32, cfg: &Config) -> (f32, f32) {
         if !cfg.ground {
             return (f32::NEG_INFINITY, 0.0);
@@ -356,8 +365,9 @@ impl Model {
         )
     }
 
-    /// The starting state: the creature's pose, its center of mass over
-    /// x = 0 and its lowest point on the ground, at rest.
+    /// The starting state: the creature's rest pose with no velocity, its
+    /// center of mass over x = 0 and its lowest point on the ground. Without a
+    /// ground the pose is not lowered.
     pub fn start(&self, cfg: &Config) -> State {
         let b = self.pivot.len();
         let mut s = State {
@@ -387,7 +397,8 @@ impl Model {
         s
     }
 
-    /// Absolute bone angles and rates, then node positions and velocities.
+    /// Fills in the absolute bone angles and rates, then the node positions
+    /// and velocities, from the joint coordinates of `s`.
     fn kinematics(&self, s: &mut State) {
         s.pos[0] = s.x0;
         s.vel[0] = s.v0;
@@ -405,7 +416,7 @@ impl Model {
         }
     }
 
-    /// The center of mass.
+    /// The center of mass (x, y) of the nodes in `s`.
     fn center(&self, s: &State) -> [f32; 2] {
         let mut c = [0.0; 2];
         for (p, m) in s.pos.iter().zip(&self.mass) {
