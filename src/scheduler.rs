@@ -1,13 +1,9 @@
-//! Routes evaluation work to the selected GPU devices. Additional GPUs require
-//! an explicit `EVOLUTION_DEVICES` selection. The GPU is the only engine:
-//! there is no CPU evaluation.
-//!
-//! Callers queue work: a population, the creatures of it to evaluate, and the
-//! trial settings. Each piece of work goes to an engine as one unit. A piece
-//! that covers its whole population is handed over without a copy.
-//! Confirmation work goes before standard work. Results come back tagged with
-//! the caller's tag, in whatever order the engines finish. The GPU's score
-//! is final.
+//! Routes evaluation work to the GPU engines and reopens a GPU that fails.
+//! Callers such as `ring` queue pieces of work under a tag, and each piece
+//! goes to an engine as one unit. Confirmation trials go before standard
+//! work, and results come back with the tag in whatever order the engines
+//! finish. A GPU that fails gets a new engine and its unfinished units again,
+//! and one that does not open stops evolution.
 use crate::{
     config::Config,
     creature_kernel::GpuResult,
@@ -24,22 +20,26 @@ use std::{
 
 mod suspend;
 
-/// What a piece of work evaluates.
+/// What a piece of work is. The kind picks its queue, its engine slot and how
+/// it is counted. The config of the work says how the trial runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trial {
-    /// A standard trial.
+    /// A standard trial at the standard physics, with the early screen and
+    /// rungs when its config sets them.
     Standard,
-    /// The confirmation trial of a creature that would set an island record
-    /// (`confirm_config`). It goes before standard work.
+    /// The confirmation trial of a creature that would set or tie the record
+    /// of an island or a nursery (`confirm_config`). It goes before standard
+    /// work.
     Confirm,
 }
 
-/// Cost of one confirmation trial relative to standard trials (twice the
-/// steps at twice the solver passes).
+/// How many standard creatures one confirmation creature counts for in a
+/// device's `rate`. It is a rough weight, not a measured cost. The fine
+/// physics runs twice the steps per second of the standard physics.
 const CONFIRM_COST: f64 = 4.0;
 
-/// Largest piece of work `evaluate` queues at once: about one second of the
-/// RTX 4060, the unit size that measured fastest end to end.
+/// Most creatures in one piece of work that `evaluate` queues. That is about
+/// one second of the RTX 4060, the unit size that measured fastest end to end.
 pub const WORK_UNIT: usize = 196_608;
 
 /// The settings of a confirmation trial: the same world and screen as the
@@ -54,20 +54,25 @@ pub fn confirm_config(cfg: &Config) -> Config {
     }
 }
 
-/// Creatures waiting for an engine.
+/// A piece of work waiting for an engine: creatures of one population to
+/// evaluate with one config.
 struct Work {
     /// Caller's work tag to return in results.
     tag: u64,
     /// A standard or a confirmation trial.
     trial: Trial,
     population: Arc<Population>,
-    /// Creatures of `population` to evaluate, in order; `None` for all.
+    /// Creatures of `population` to evaluate, in order. `None` means all of
+    /// them.
     members: Option<Vec<usize>>,
     config: Arc<Config>,
-    /// Largest body among the members, in nodes.
+    /// Largest body among the members, in nodes. Only an engine that can hold
+    /// that many nodes takes the work.
     max_nodes: usize,
 }
 
+/// A unit on an engine. It keeps the exact input the engine got, so a
+/// reopened GPU can run it again.
 #[derive(Clone)]
 struct QueuedUnit {
     /// Engine's work ticket.
@@ -76,14 +81,19 @@ struct QueuedUnit {
     tag: u64,
     /// A standard or a confirmation trial.
     trial: Trial,
-    /// Creature indices of the queued work, in unit order.
+    /// Indices of the unit's creatures in the caller's population, in unit
+    /// order.
     members: Vec<usize>,
+    /// Exactly the unit's creatures, in unit order. Result `k` of the engine
+    /// belongs to creature `k` of it.
     population: Arc<Population>,
+    /// The settings the unit was submitted with. A later `retarget` does not
+    /// change them.
     config: Config,
     /// The scheduler session the unit belongs to. Units of an older session
     /// finish on their engine and their results are dropped.
     session: u64,
-    /// How many times this unit has moved to another engine.
+    /// How many times the unit was submitted again after its GPU failed.
     retries: u8,
 }
 
@@ -92,8 +102,10 @@ struct QueuedUnit {
 pub struct Done {
     /// Caller's work tag.
     pub tag: u64,
+    /// The kind of trial that ran.
     pub trial: Trial,
-    /// Creature indices in the queued population.
+    /// Indices of the finished creatures in the queued population, in the
+    /// order of `metrics`.
     pub members: Vec<usize>,
     /// Evaluation metrics in member order.
     pub metrics: Vec<EvaluationMetrics>,
@@ -102,13 +114,16 @@ pub struct Done {
 /// How to open a GPU engine again after it failed, and how long to wait
 /// before each attempt.
 pub struct Reopen {
+    /// Opens a new engine on the same GPU.
     open: Box<dyn FnMut() -> Result<Box<dyn Engine>> + Send>,
     /// Delay before each recovery attempt.
     backoff: Vec<Duration>,
 }
 
-/// Stands in for a failed engine while its replacement opens. It holds no
-/// device, so the driver can release the old one.
+/// Stands in for an engine that was closed: a failed one while its
+/// replacement opens, or one closed during a suspension (`suspend.rs`). It
+/// holds no device, so the driver can release the old one, and it takes no
+/// work.
 struct RetiredEngine;
 
 impl Engine for RetiredEngine {
@@ -130,35 +145,54 @@ impl Engine for RetiredEngine {
     fn wait(&mut self, _: Duration) {}
 }
 
+/// One GPU engine with the units on it, its failure state and its counters.
 pub struct Device {
+    /// The engine that evaluates. A `RetiredEngine` takes its place while the
+    /// GPU is closed.
     pub engine: Box<dyn Engine>,
-    /// Set for a GPU that can be opened again after a failure.
+    /// How to open this GPU again after a failure. Only the primary GPU has
+    /// one. `recover` takes it and puts it back once the GPU has opened, so a
+    /// GPU that could not be reopened has none left.
     reopen: Option<Reopen>,
-    /// Reopens since the last unit finished on this device.
+    /// Reopen attempts used since the last unit finished on this device. The
+    /// next recovery starts at this place in `Reopen::backoff`, and a GPU that
+    /// used every attempt stops the scheduler on its next failure.
     recoveries: usize,
-    /// Set when the engine reported a failure. A failed GPU is reopened, and
-    /// one that does not open again stops the scheduler.
+    /// Why the device failed. It is set when the engine reports a failure, a
+    /// submission fails, or the GPU does not open again after a suspension. A
+    /// failed GPU is reopened, and one that does not open again stops the
+    /// scheduler.
     failure: Option<String>,
-    /// Exact submitted input remains available until its result is accepted.
+    /// The units on the engine, in submission order, with their exact input.
+    /// A unit stays until its result is accepted, so a reopened GPU can run it
+    /// again.
     queued: VecDeque<QueuedUnit>,
     /// Measured standard creatures per wall second while the device has
-    /// work queued. Units on separate queues overlap, so their own busy
-    /// times would overstate the device's time.
+    /// work queued. It starts as the guess given to `new`. Units on separate
+    /// queues overlap, so their own busy times would overstate the device's
+    /// time.
     pub rate: f64,
     /// Exponentially decayed standard creatures finished and busy wall
     /// seconds behind `rate`, and when they were last updated.
     rate_work: f64,
     rate_time: f64,
     rate_at: Option<Instant>,
-    /// Wall seconds with nothing queued, and since when the device has been
-    /// idle (sampled whenever the scheduler pumps or collects).
+    /// Wall seconds the device had nothing queued. An idle period is added
+    /// when it ends. The queue is sampled whenever the scheduler pumps or
+    /// collects.
     pub idle_seconds: f64,
+    /// When the current idle period began, or `None` while work is queued.
     idle_since: Option<Instant>,
+    /// Standard creatures finished on this device since start.
     pub creatures: u64,
+    /// Seconds the engine reported busy on the units that finished, standard
+    /// and confirmation, since start.
     pub busy_seconds: f64,
 }
 
 impl Device {
+    /// A device with nothing queued. `rate` is the guess of its standard
+    /// creatures per second until it has been measured.
     fn new(engine: Box<dyn Engine>, rate: f64) -> Self {
         Self {
             engine,
@@ -176,9 +210,11 @@ impl Device {
             idle_since: None,
         }
     }
-    /// Advances the rate average to `now`, counting the time since the last
-    /// update as busy when work was queued, plus `done` finished standard
-    /// creatures. Averages decay over about 20 s of wall time.
+    /// Advances the rate average to `now`. The time since the last update
+    /// counts as busy when `busy` is true, and `done` is the work that
+    /// finished, in standard creatures. Both sums decay over about 20 s of wall
+    /// time. `rate` follows them once they hold 2 busy seconds and 1,024
+    /// creatures.
     fn update_rate(&mut self, now: Instant, busy: bool, done: usize) {
         if let Some(at) = self.rate_at {
             let dt = now.duration_since(at).as_secs_f64();
@@ -195,7 +231,10 @@ impl Device {
             self.rate = self.rate_work / self.rate_time;
         }
     }
-    /// Updates the idle time and rate average at the given instant.
+    /// Samples the queue at `now`. The time since the last sample counts as
+    /// busy for the rate when the device was not idle then. An empty queue
+    /// starts an idle period. Work in the queue ends it and adds it to
+    /// `idle_seconds`.
     fn sample_idle(&mut self, now: Instant) {
         self.update_rate(now, self.idle_since.is_none(), 0);
         match (self.queued.is_empty(), self.idle_since) {
@@ -209,34 +248,45 @@ impl Device {
     }
 }
 
+/// Routes queued work to the devices and reopens a device that fails.
 pub struct Scheduler {
+    /// The GPUs. The first is the primary GPU.
     pub devices: Vec<Device>,
-    /// Work waiting for an engine: confirmations first, then standard work.
+    /// Confirmation work waiting for an engine. It goes before standard work.
     confirms: VecDeque<Work>,
+    /// Standard work waiting for an engine.
     work: VecDeque<Work>,
-    /// Current session ID for dropping old in-flight results.
+    /// The current session. `reset` starts a new one, and the results of
+    /// units from an older session are dropped.
     session: u64,
-    /// Seconds spent packing work for the GPU.
+    /// Seconds spent in `submit` handing work to the engines, mostly copying
+    /// the members of a piece of work into a unit. The engine thread packs the
+    /// unit for the GPU.
     pub packing_seconds: f64,
-    /// Totals since start: confirmation trials submitted, and the device
-    /// busy seconds they took.
+    /// Confirmation trials submitted since start, one for each creature.
     pub confirms_submitted: u64,
+    /// Device busy seconds the confirmation trials took since start.
     pub confirm_busy_seconds: f64,
     /// Lane-steps of standard trials since start, per lane class
-    /// (`kernel::CLASSES`): steps a creature ran times its lanes.
+    /// (`kernel::CLASSES`): steps a creature ran times its lanes. Only entry 0
+    /// is used while `kernel::CLASSES` holds one class.
     pub lane_steps: [u64; 4],
     /// Messages for the player (a GPU lost and reopened), taken by the worker.
     notices: Vec<String>,
     /// Developer hook (`EVOLUTION_SIMULATE_GPU_LOSS=N`): the GPU fails once,
     /// after N units of its results were collected.
     simulate_loss_after: Option<u64>,
+    /// Units collected from the engines since start. `simulate_loss_after` is
+    /// compared with it.
     collected_units: u64,
     /// Evaluation held for a developer measurement (see `suspend.rs`).
     suspension: suspend::Suspension,
 }
 
-/// Returns explicitly requested secondary GPU names. The safe default is to
-/// use only the primary GPU; `primary` and `off` both keep secondary GPUs off.
+/// The names of the secondary GPUs that an `EVOLUTION_DEVICES` selection asks
+/// for, from a comma separated list. There are none by default. The selection
+/// `primary` or `off` also asks for none, and an entry with either name is
+/// skipped in a longer list.
 fn secondary_device_names(selection: Option<&str>) -> Vec<&str> {
     let Some(selection) = selection else {
         return Vec::new();
