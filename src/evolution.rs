@@ -295,6 +295,12 @@ impl StoredCreature {
     pub fn bone_count(&self) -> usize {
         self.bone_n as usize
     }
+    /// The bones, read in place.
+    pub fn bones(&self) -> &[Bone] {
+        let nodes_end = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4);
+        let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
+        bytemuck::cast_slice(&self.genes[nodes_end..bones_end])
+    }
     pub fn muscle_count(&self) -> usize {
         let used = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4)
             + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);

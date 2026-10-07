@@ -484,19 +484,21 @@ struct ParentTraits {
 
 /// A short summary of a body for body novelty: node, bone and muscle counts,
 /// leaf count and total bone length.
-fn body_embedding(c: &Creature) -> [f32; 5] {
+/// A body's summary for body novelty, read from its stored genes.
+fn body_embedding(c: &StoredCreature) -> [f32; 5] {
+    let bones = c.bones();
     let mut has_child = [false; crate::evolution::MAX_NODES];
-    for b in c.bones.iter() {
+    for b in bones {
         if let Some(x) = has_child.get_mut(b.a as usize) {
             *x = true;
         }
     }
-    let leaves = (1..c.nodes.len()).filter(|&n| !has_child[n]).count();
-    let length: f32 = c.bones.iter().map(|b| b.rest_length).sum();
+    let leaves = (1..c.node_count()).filter(|&n| !has_child[n]).count();
+    let length: f32 = bones.iter().map(|b| b.rest_length).sum();
     [
-        c.nodes.len() as f32 / 4.0,
-        c.bones.len() as f32 / 4.0,
-        c.muscles.len() as f32 / 8.0,
+        c.node_count() as f32 / 4.0,
+        bones.len() as f32 / 4.0,
+        c.muscle_count() as f32 / 8.0,
         leaves as f32 / 2.0,
         length / 2.0,
     ]
@@ -1398,7 +1400,7 @@ impl QdArchive {
         let behavior = &self.behavior_indices;
         let bodies: Vec<[f32; 5]> = behavior
             .iter()
-            .map(|&i| body_embedding(&self.entries[i].creature.unpack()))
+            .map(|&i| body_embedding(&self.entries[i].creature))
             .collect();
         let samples = bodies.len().min(32);
         let mut body_novelty = vec![0.0; len];
