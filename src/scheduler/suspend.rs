@@ -1,40 +1,49 @@
-//! Suspending evaluation for a developer measurement (`crate::dev_pause`).
-//!
-//! A suspended scheduler submits nothing new to any engine. Units already
-//! on an engine finish and are collected as usual, so the caller absorbs
-//! them in the same order as ever. Once no engine holds work, every GPU that
-//! can be opened again is closed, which frees its memory. Resuming opens it
-//! again. To the search a suspension looks like a GPU that was slow for a
-//! while, and the ring absorbs blocks in a fixed order whatever the timing,
-//! so a suspended and resumed run gives the same results.
+//! This module suspends the scheduler for `crate::dev_pause`, which holds
+//! evaluation back for a developer measurement. A suspended scheduler submits
+//! no new unit, and units already on an engine finish and are collected as
+//! usual. When no engine holds a unit, `close_idle_engines` frees the GPU
+//! memory by closing every engine that can be reopened, and `resume` opens
+//! them again. The ring absorbs blocks in a fixed order whatever the timing,
+//! so the search sees only a slow GPU and a paused run gives the same results.
 
 use super::*;
 
+/// The suspension state of a `Scheduler`: the flag that holds work back and
+/// the engines closed so far.
 #[derive(Default)]
 pub(super) struct Suspension {
+    /// True from `suspend` until `resume`. While it is true `pump` hands out
+    /// no work.
     active: bool,
-    /// Devices whose GPU engine was closed, to open again on resume.
+    /// Indices into `Scheduler::devices` of the engines that
+    /// `close_idle_engines` closed. `resume` opens them again and empties the
+    /// list.
     closed: Vec<usize>,
 }
 
 impl Scheduler {
-    /// Stops handing new work to the engines.
+    /// Stops handing new work to the engines. Units already on an engine
+    /// finish, and `collect` still returns them.
     pub fn suspend(&mut self) {
         self.suspension.active = true;
     }
 
+    /// True from `suspend` until `resume`.
     pub fn suspended(&self) -> bool {
         self.suspension.active
     }
 
-    /// Whether the scheduler may submit work now.
+    /// True when `pump` may hand work to the engines. That is when the
+    /// scheduler is not suspended.
     pub(super) fn may_submit(&self) -> bool {
         !self.suspension.active
     }
 
-    /// While suspended: once no engine holds a unit, closes every GPU engine
-    /// that can be opened again. Returns true when no engine holds work and
-    /// the GPUs are closed.
+    /// Closes every GPU engine that can be reopened, which frees its memory.
+    /// It does this only while the scheduler is suspended and no engine holds
+    /// a unit. It returns true in that case. Otherwise it closes nothing and
+    /// returns false. An engine with no reopen hook, or with a failure, is
+    /// left as it is. A repeated call closes nothing more.
     pub fn close_idle_engines(&mut self) -> bool {
         if !self.suspension.active {
             return false;
@@ -56,9 +65,9 @@ impl Scheduler {
         true
     }
 
-    /// Ends a suspension: opens the closed GPUs again and lets work flow. A
-    /// GPU that does not open is marked failed, so the usual recovery tries
-    /// again.
+    /// Ends a suspension: opens the closed GPUs again and lets `pump` hand out
+    /// work. A GPU that does not open is marked failed, so the next `collect`
+    /// runs the usual recovery and tries again.
     pub fn resume(&mut self) {
         self.suspension.active = false;
         for index in std::mem::take(&mut self.suspension.closed) {
