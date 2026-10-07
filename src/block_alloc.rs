@@ -1,7 +1,7 @@
 //! The global allocator. Large blocks come straight from the kernel as
 //! anonymous mappings, and a freed one is kept for the next block of its
-//! size. Small blocks come from the system allocator, which is set to keep
-//! the memory it frees.
+//! size class. Small blocks come from the system allocator, which is set to
+//! keep the memory it frees.
 //!
 //! The breeder, the archives and the pack work on vectors of megabytes to
 //! hundreds of megabytes, and the ring makes the same ones again for every
@@ -25,16 +25,22 @@ const KEEP_BYTES: usize = 1 << 30;
 /// Mappings kept for reuse, at most this many.
 const KEEP_COUNT: usize = 64;
 
+/// The program's global allocator, which `lib.rs` installs with
+/// `#[global_allocator]`. It has no fields. The kept mappings and the counters
+/// are statics of this module.
 pub struct BlockAlloc;
 
 use std::sync::atomic::AtomicU64;
 
-/// Large blocks: reused from the kept list, newly mapped, and given back.
+/// Large blocks handed out from the kept list.
 static HITS: AtomicU64 = AtomicU64::new(0);
+/// Large blocks newly mapped from the kernel.
 static MAPS: AtomicU64 = AtomicU64::new(0);
+/// Mappings given back to the kernel.
 static UNMAPS: AtomicU64 = AtomicU64::new(0);
 
-/// (reused, mapped, unmapped) large blocks since the start (a diagnostic).
+/// How many large blocks were reused from the kept list, newly mapped and
+/// unmapped, in that order, since the program started. A diagnostic.
 pub fn large_blocks() -> (u64, u64, u64) {
     (
         HITS.load(Ordering::Relaxed),
@@ -43,16 +49,21 @@ pub fn large_blocks() -> (u64, u64, u64) {
     )
 }
 
+/// Whether `tune` has already set glibc's parameters.
 static TUNED: AtomicBool = AtomicBool::new(false);
+/// Whether allocations are being counted. `count_allocations` sets it.
 static COUNTING: AtomicBool = AtomicBool::new(false);
+/// Allocations and reallocations counted on all threads together.
 static TOTAL: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
+    // Allocations and reallocations counted on this thread.
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Starts counting allocations per thread (a benchmark's diagnostic; off
-/// otherwise, and then it costs one relaxed load per allocation).
+/// Turns allocation counting on, for each thread and for all threads
+/// together. It stays on for the rest of the run. It is a diagnostic for
+/// benchmarks. While counting is off, an allocation costs one relaxed load.
 pub fn count_allocations() {
     COUNTING.store(true, Ordering::Relaxed);
 }
@@ -75,10 +86,11 @@ fn count() {
     }
 }
 
-/// Sets glibc's allocator once, before its first use here: blocks under
-/// `LARGE` always come from its heaps (by default it maps blocks over 128 KiB
-/// and moves that threshold up and down as they are freed), and a heap
-/// returns memory to the system only above 1 GiB free at its end.
+/// Sets glibc's allocator once, before its first use here. Blocks under
+/// `LARGE` always come from its heaps. Left alone, it maps blocks over 128 KiB
+/// and raises that threshold as it frees mapped blocks. A heap returns memory
+/// to the system only when more than 1 GiB is free at its end, and it asks the
+/// system for 16 MiB extra each time it grows.
 fn tune() {
     if !TUNED.swap(true, Ordering::Relaxed) {
         // SAFETY: mallopt only sets allocator parameters.
@@ -90,15 +102,17 @@ fn tune() {
     }
 }
 
-/// Whether this layout qualifies as a large block allocation.
+/// Whether a block of this layout is mapped directly. It must be at least
+/// `LARGE` bytes, and a mapping is page aligned, so an alignment above 4096
+/// bytes goes to the system allocator.
 fn large(layout: Layout) -> bool {
     layout.size() >= LARGE && layout.align() <= 4096
 }
 
 /// The bytes mapped for a block of `size`: a multiple of 2 MiB up to 32 MiB,
-/// then steps of an eighth of the power of two below. Blocks of one class are
-/// interchangeable. Memory past `size` that nothing touches is never faulted
-/// in.
+/// then steps of an eighth of the power of two below `size`. Blocks of one
+/// class are interchangeable. Memory past `size` that nothing touches is never
+/// faulted in.
 fn class(size: usize) -> usize {
     if size <= 32 << 20 {
         size.next_multiple_of(STEP)
@@ -115,6 +129,8 @@ struct Kept {
     inner: UnsafeCell<KeptInner>,
 }
 
+/// The list behind the lock. `entries[..count]` are the kept mappings as
+/// (address, length) pairs, and `bytes` is the sum of their lengths.
 struct KeptInner {
     count: usize,
     bytes: usize,
@@ -134,6 +150,7 @@ static KEPT: Kept = Kept {
 };
 
 impl Kept {
+    /// Runs `f` on the list while holding the spin lock.
     fn with<R>(&self, f: impl FnOnce(&mut KeptInner) -> R) -> R {
         while self
             .lock
@@ -148,7 +165,8 @@ impl Kept {
         result
     }
 
-    /// A kept mapping of exactly `len` bytes.
+    /// Removes a kept mapping of exactly `len` bytes from the list and returns
+    /// it, or returns null when there is none.
     fn take(&self, len: usize) -> *mut u8 {
         self.with(|k| {
             let n = k.count;
@@ -165,8 +183,11 @@ impl Kept {
         })
     }
 
-    /// Keeps the mapping. When the list is full the oldest mappings go back
-    /// to the kernel first; a mapping that cannot fit at all is refused.
+    /// Keeps the mapping and returns true. When the list is full or would pass
+    /// `KEEP_BYTES`, mappings from the front of the list go back to the kernel
+    /// first. The front is the oldest, except that `take` fills the slot it
+    /// frees with the last entry. A mapping longer than `KEEP_BYTES` is refused
+    /// and the call returns false.
     fn put(&self, ptr: *mut u8, len: usize) -> bool {
         self.with(|k| {
             if len > KEEP_BYTES {
@@ -209,7 +230,9 @@ unsafe fn map(len: usize) -> *mut u8 {
 }
 
 /// A large block of `size` bytes: a kept mapping of its class (its contents
-/// are whatever the last block left) or a new zeroed one.
+/// are whatever the last block left) or a new zeroed one. It returns the
+/// pointer, which is null if the kernel refused. It also returns whether the
+/// memory is a new mapping and so zero.
 unsafe fn large_alloc(size: usize) -> (*mut u8, bool) {
     let len = class(size);
     let kept = KEPT.take(len);
@@ -255,8 +278,8 @@ unsafe impl GlobalAlloc for BlockAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` came from `alloc` with this layout, so a large one
-        // is a mapping of `class` bytes.
+        // SAFETY: `ptr` came from this allocator with this layout, so a large
+        // one is a mapping of `class` bytes.
         unsafe {
             if large(layout) {
                 let len = class(layout.size());
@@ -272,8 +295,8 @@ unsafe impl GlobalAlloc for BlockAlloc {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count();
-        // SAFETY: `ptr` came from `alloc` with `layout`; the new layout has
-        // the same alignment.
+        // SAFETY: `ptr` came from this allocator with `layout`, and the new
+        // layout has the same alignment.
         unsafe {
             let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
             match (large(layout), large(new_layout)) {
@@ -283,6 +306,7 @@ unsafe impl GlobalAlloc for BlockAlloc {
                 }
                 (true, true) => {
                     let (old, new) = (class(layout.size()), class(new_size));
+                    // The same class: the mapping already fits the new size.
                     if old == new {
                         return ptr;
                     }
@@ -296,6 +320,8 @@ unsafe impl GlobalAlloc for BlockAlloc {
                         self.dealloc(ptr, layout);
                         return kept;
                     }
+                    // No kept mapping: the kernel extends or moves the pages
+                    // without a copy. If it fails, the old mapping stays valid.
                     let moved =
                         libc::mremap(ptr as *mut libc::c_void, old, new, libc::MREMAP_MAYMOVE);
                     if moved == libc::MAP_FAILED {
@@ -304,6 +330,8 @@ unsafe impl GlobalAlloc for BlockAlloc {
                     moved as *mut u8
                 }
                 _ => {
+                    // The block crosses `LARGE`, so it moves between a mapping
+                    // and the system allocator, with a copy.
                     let fresh = if large(new_layout) {
                         large_alloc(new_size).0
                     } else {
