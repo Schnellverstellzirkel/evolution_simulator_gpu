@@ -1,7 +1,7 @@
 //! Runs the background autosave, one save at a time, on its own thread. The
-//! worker starts one with `start_if_due` when a generation ends, and
-//! `finished` reports the file it wrote so the event log can say so. The file
-//! is `runs/seed-<seed>-auto.evo`, and the three newest autosaves stay.
+//! worker starts one with `start_if_due` when a generation ends. `finished`
+//! reports the file it wrote, so the event log can say so. Each experiment
+//! writes `runs/seed-<seed>-auto.evo`, and the three newest autosaves stay.
 
 use crate::storage::{self, Experiment};
 use std::{path::PathBuf, thread::JoinHandle};
@@ -21,9 +21,9 @@ impl Autosave {
             let _ = handle.join();
         }
     }
-    /// Starts an autosave of `e` in the background when autosave is on, the
-    /// generation is a multiple of the interval, the archive holds elites and
-    /// the last autosave has ended.
+    /// Starts an autosave of `e` in the background if one is due. One is due
+    /// when autosave is on and the generation is a multiple of the interval.
+    /// The archive must hold elites, and the last autosave must have ended.
     pub(super) fn start_if_due(&mut self, e: &Experiment) {
         // `EVOLUTION_BENCH_NO_AUTOSAVE` keeps benchmarks from autosaving,
         // whatever interval their settings carry. The archive must hold

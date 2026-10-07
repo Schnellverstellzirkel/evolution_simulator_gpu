@@ -190,11 +190,10 @@ impl Benchmark {
         false
     }
 }
-/// Prints the benchmark report on stderr: the run's rate and settings, the
-/// stage seconds, the generation times, the snapshot build times, the
-/// settings latency, the control latency, the worker thread's major faults,
-/// each device and the packing totals. `generations` and `seconds` cover the
-/// measured window.
+/// Prints the benchmark report on stderr. It gives the run's rate, the stage
+/// seconds, the generation and snapshot build times, the settings and control
+/// latency, the worker thread's major faults, and the totals of each device
+/// and of packing. `generations` and `seconds` cover the measured window.
 #[allow(clippy::too_many_arguments)]
 fn report_benchmark(
     e: &Experiment,

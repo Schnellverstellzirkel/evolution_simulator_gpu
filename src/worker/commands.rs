@@ -1,7 +1,7 @@
-//! Handles the commands from the UI. `next_command` reads one,
-//! `handle_commands` runs every command that is waiting, and `handle` runs a
-//! single one. `Loop::pass` in `src/worker.rs` calls the first two on every
-//! pass.
+//! Handles the commands from the UI. `Loop::pass` in `src/worker.rs` calls
+//! `next_command` to read one and `handle_commands` to run every command that
+//! is waiting. `handle_commands` calls `handle` for each command. The other
+//! methods in this file carry out one command each.
 
 use super::{Command, EventKind, LineageStep, Loop, log_event, log_world_change};
 use crate::{
@@ -31,10 +31,10 @@ impl Loop {
             Err(_) => ControlFlow::Continue(None),
         }
     }
-    /// Runs every command that is waiting, in order: the ones deferred
-    /// earlier, then `first`, which `next_command` read, then the rest of the
-    /// channel. No command waits for the engines. `Break` on
-    /// `Command::Shutdown`.
+    /// Runs every command that is waiting. The order is the ones deferred
+    /// earlier, then `first`, then the rest of the channel. `first` is the
+    /// command `next_command` read. No command waits for the engines. `Break`
+    /// on `Command::Shutdown`.
     pub(super) fn handle_commands(&mut self, first: Option<Command>) -> ControlFlow<()> {
         // Commands deferred during a load or a search pass run first, unless a
         // load is still in progress.
