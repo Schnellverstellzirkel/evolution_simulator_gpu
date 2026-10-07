@@ -50,10 +50,10 @@ python3 -m venv ~/.local/share/evolution-cuda/venv
 ```
 
 Pick an NVRTC no newer than the driver's CUDA version (`nvidia-smi` shows it;
-driver 580 is CUDA 13.0). When the engine opens, the game compiles the kernels
-of the default world (4: scoring and replay, each at the standard and the fine
+driver 580 is CUDA 13.0). When the engine opens, the game compiles the 4 kernels
+of the default world (scoring and replay, each at the standard and the fine
 physics) and the scoring kernels of the 49 distinct worlds of the 100 wild
-islands (49), on up to five threads, and a loading screen follows them
+islands, on up to five threads, and a loading screen follows them
 (`src/loading.rs`, `src/ui/loading.rs`): a card with the kernels compiling, the
 time left and a button to look around meanwhile, and a corner note after that.
 The kernels of the world after a button press compile when the world changes,
