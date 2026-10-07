@@ -229,8 +229,8 @@ struct App {
     events_seen: (u64, usize),
     /// The path in the text box of the Open window and of the file dialogs.
     file_path: String,
-    /// A message for the status line. The status line takes it on the next
-    /// frame and keeps it in `shown_message`.
+    /// A message for the status line. The status line moves it into
+    /// `shown_message` the next time it draws.
     message: Option<String>,
     /// The message on the status line and when it first showed.
     shown_message: Option<(String, Instant)>,
@@ -250,7 +250,7 @@ struct App {
     /// The Diagnostics drawer under the status line is open.
     show_perf: bool,
     /// The UI scale of the View menu, which is egui's zoom factor.
-    /// `EVOLUTION_SMOKE_ZOOM` sets the first one.
+    /// `EVOLUTION_SMOKE_ZOOM` sets its starting value.
     ui_scale: f32,
     /// Set at the start, by Create population and by Open. The next snapshot
     /// of a newly started or opened game then replaces `config` with that
@@ -841,9 +841,9 @@ impl App {
             }
         }
     }
-    /// Advances the replay by the time of the frame `dt` at the chosen speed,
-    /// and the race lanes too on the Race tab. Then the camera follows the
-    /// creature.
+    /// While the replays play, advances the replay by the time `dt` of the
+    /// frame at the chosen speed, and the race lanes too on the Race tab. Then
+    /// the camera follows the creature if `follow` is on.
     fn advance_replays(&mut self, dt: f32) {
         if self.playing {
             // The replay time of one recorded frame, which is one physics step.
@@ -1313,7 +1313,8 @@ impl eframe::App for App {
         }
     }
 }
-/// Writes `image` to `path` as a PNG. A failure goes to stderr and no further.
+/// Writes `image` to `path` as a PNG. If that fails, it prints the error on
+/// stderr and returns.
 fn write_png(path: &str, image: &egui::ColorImage) {
     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
     if let Err(e) = image::save_buffer(
