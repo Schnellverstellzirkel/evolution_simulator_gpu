@@ -1,5 +1,7 @@
-//! The top bar (the game's name, Evolve and the File and View menus) and the
-//! Help window it opens.
+//! The top bar and the Help window. The bar holds the logo, the game's name and
+//! the Evolve or Pause button. On its right are the Help button, the View and
+//! File menus, the save state, the creature count and the trial length. `ui.rs`
+//! calls `App::top` and `App::help_window` every frame.
 
 use super::{AUTOSAVE_INTERVAL, App, GAP_S, dialogs::list_saves, text::number};
 use crate::{theme::GAP_L, worker::Command};
@@ -7,6 +9,10 @@ use eframe::egui::{self, Align2, FontId, RichText, Sense, Stroke, Vec2};
 use std::time::{Duration, Instant};
 
 impl App {
+    /// The content of the top bar. The Evolve button starts evolution and
+    /// reads Pause while it runs. The Help button, the View menu and the File
+    /// menu sit at the right edge, with the save state and the creature count
+    /// and trial length beside them.
     pub(super) fn top(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
@@ -78,6 +84,8 @@ impl App {
                     self.run(true, false);
                 }
             }
+            // The right side fills from the right edge, so Help, added first,
+            // ends up at the far right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Help")
@@ -97,6 +105,7 @@ impl App {
                         ui.ctx().set_zoom_factor(self.ui_scale);
                     }
                 });
+                // Most entries start a dialog of `dialogs.rs`.
                 ui.menu_button("File", |ui| {
                     if ui.button("New experiment…").clicked() {
                         self.new_dialog = true;
@@ -121,6 +130,9 @@ impl App {
                         ui.close();
                     }
                     if ui.button("Screenshot").clicked() {
+                        // The frame loop sends the request in
+                        // `request_screenshots` and saves the image in
+                        // `handle_screenshot_events`.
                         self.screenshot_pending = true;
                         self.screenshot_waiting = true;
                         self.message = Some("Taking a screenshot…".into());
@@ -166,7 +178,8 @@ impl App {
             });
         });
     }
-    /// Keyboard shortcuts and what each tab shows.
+    /// The Help window, shown while `show_help` is on: the keyboard shortcuts,
+    /// a button for the "How evolution works" window, and what each tab shows.
     pub(super) fn help_window(&mut self, ctx: &egui::Context) {
         if !self.show_help {
             return;
