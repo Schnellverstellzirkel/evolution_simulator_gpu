@@ -66,12 +66,12 @@ impl ScreenWindow {
 
 /// Confirmation trials a block asks for per archive at once while it waits
 /// for the ones it needs. Many record claims fail the fine trial, so asking
-/// a few at a time chained round trips while the ring waited. Measured on
-/// 2026-10-02 with the earlier kernel, at 3M per generation: generations 11
-/// to 15 ran 127k to 196k creatures/s with 8, 196k to 330k with 64 and 308k
-/// to 421k with 512. Without a limit an empty archive asks for nearly every
-/// creature (1.07M trials in generation 0). `ConfirmHint` raises the limit
-/// of an archive that stands on a plateau.
+/// a few at a time chained round trips while the ring waited. Measured when
+/// the limit was added (2026-10-02, earlier kernel), at 3M per generation:
+/// generations 11 to 15 ran 127k to 196k creatures/s with 8, 196k to 330k
+/// with 64 and 308k to 421k with 512. Without a limit an empty archive asks
+/// for nearly every creature (1.07M trials in generation 0). `ConfirmHint`
+/// raises the limit of an archive that stands on a plateau.
 const SPECULATIVE_CONFIRMS: usize = 512;
 /// An entrant gets its fine trial when it is at least this share of its
 /// archive's best.
