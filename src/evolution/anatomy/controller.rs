@@ -1,12 +1,11 @@
-//! Operators that retune the controller of a whole limb or of a pair of
-//! muscles at one joint, without touching the skeleton: scale a limb's stroke,
-//! shift its posture, taper its strength along the chain, copy one limb's
-//! rhythm onto another limb with an offset, and set two muscles of one joint
-//! to alternate or to act together.
-//!
-//! Like the other muscle and rhythm operators they change no bone or node,
-//! so the motor ring stays as it is. They only touch active muscles (a
-//! stroke longer than zero), never the passive ring.
+//! Operators that retune the muscle controllers of a body: the stroke,
+//! posture, strength, phase, clock or touchdown reflex of one limb, of one or
+//! two muscles or of the whole body. They leave the skeleton alone and add or
+//! remove no muscle, so the motor ring stays as it is. They retune active
+//! muscles (a stroke longer than zero), except `shift_gait_start`,
+//! `reflex_reset_shift` and `release_touchdown`, which reach passive muscles
+//! too. All but `shift_gait_start` share the `CONTROLLER_SLOT` pick slot in
+//! `mod.rs`.
 use super::limbs::{limb_roots, pick};
 use super::{BoneIds, Context, MuscleIds, branch, muscles_on};
 use crate::config::Config;
@@ -16,7 +15,7 @@ use crate::evolution::{
 };
 
 /// The active muscles (with a stroke) that have an end on the limb starting
-/// at `root`.
+/// at `root`, in muscle order.
 pub(super) fn active_on(c: &Creature, root: usize) -> MuscleIds {
     muscles_on(c, &branch(c, root), false)
         .into_iter()
@@ -24,7 +23,8 @@ pub(super) fn active_on(c: &Creature, root: usize) -> MuscleIds {
         .collect()
 }
 
-/// Limb roots that have at least one active muscle.
+/// Limb roots that have at least one active muscle. A limb is the branch that
+/// starts at its root bone, so one limb can hold another.
 fn driven_limbs(c: &Creature) -> BoneIds {
     limb_roots(c)
         .into_iter()
