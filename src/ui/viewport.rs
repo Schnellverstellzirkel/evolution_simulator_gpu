@@ -294,16 +294,16 @@ impl App {
         let quake_hash = self
             .playback
             .as_ref()
-            .map_or(0, |p| crate::physics::quake_hash(p.creature.id));
+            .map_or(0, |p| physics::quake_hash(p.creature.id));
         let slope = if cfg.ground { cfg.slope } else { 0.0 };
         let gaps = if cfg.ground { cfg.gaps } else { 0.0 };
         let hurdles = if cfg.ground { cfg.hurdles } else { 0.0 };
         let quake = if cfg.ground { cfg.quake } else { 0.0 };
         let mud = if cfg.ground { cfg.mud } else { 0.0 };
-        let amplitude = crate::physics::terrain_amplitude(cfg.terrain)
-            + quake * crate::physics::quake_scale(quake_hash);
+        let amplitude =
+            physics::terrain_amplitude(cfg.terrain) + quake * physics::quake_scale(quake_hash);
         let phase = if quake > 0.0 {
-            crate::physics::quake_phase(quake_hash)
+            physics::quake_phase(quake_hash)
         } else {
             0.0
         };
@@ -856,7 +856,8 @@ impl App {
             {
                 self.file("Export creature JSON");
             }
-            // A menu does not wrap by itself, so start a new line when it will not fit.
+            // The speed menu does not wrap by itself, so start a new line when
+            // it will not fit.
             if ui.available_width() < 175. {
                 ui.end_row();
             }
@@ -967,9 +968,10 @@ impl SceneFrame<'_> {
     fn world(&self, x: f32, y: f32) -> Pos2 {
         Pos2::new(self.origin.x + x * self.zoom, self.origin.y - y * self.zoom)
     }
-    /// The ground's height at x, with or without its hurdles.
+    /// The ground's height (m) at the world x (m), with or without its
+    /// hurdles.
     fn height_at(&self, x: f32, with_hurdles: bool) -> f32 {
-        crate::physics::ground(
+        physics::ground(
             x,
             self.amplitude,
             self.slope,
@@ -1020,7 +1022,7 @@ mod tests {
         assert_eq!(auto_zoom(0.5, 0.5, 260.0), typical);
     }
     #[test]
-    fn default_zoom_follows_body_height() {
+    fn fitted_zoom_follows_body_height() {
         let small = fit_zoom(0.3, 260.0);
         let tall = fit_zoom(1.5, 260.0);
         assert!(small > tall);
