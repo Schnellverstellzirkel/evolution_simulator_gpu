@@ -143,11 +143,12 @@ fn insert_joint(c: &mut Creature, first: usize, t: f32, side: [f32; 2], rng: &mu
     second
 }
 
-/// Lengthens the last bone of a leg (the lower leg or the foot) by 1.2 to 1.7
-/// times, so the foot goes farther down and the leg longer, and the muscles
-/// keep their stroke. Cursorial mammals put the length in the distal bones,
-/// where it adds stride for little muscle mass, and a longer shank makes a
-/// longer step for the same swing of the hip (Alexander).
+/// Lengthens the last bone of a leg of two or more bones (the lower leg or the
+/// foot) by 1.2 to 1.7 times, so the leg is longer and the muscles keep their
+/// stroke. The factor stops at the longest bone allowed, and a factor under 1.1
+/// is refused. Cursorial mammals put the length in the distal bones, where it
+/// adds stride for little muscle mass, and a longer shank makes a longer step
+/// for the same swing of the hip (Alexander).
 pub(crate) fn lengthen_lower_leg(
     c: &mut Creature,
     _cfg: &Config,
@@ -168,6 +169,9 @@ pub(crate) fn lengthen_lower_leg(
     shift_branch(c, last, scale(along, factor - 1.0));
     c.bones[last].rest_length = length * factor;
     lift(c);
+    // TODO: `c` is already edited here, so a refusal leaves the longer leg in
+    // place and the caller reads the body as unchanged. Editing a copy, as
+    // `fold_leg_zigzag` does, would fix that.
     if !inside(c) {
         return false;
     }
@@ -175,11 +179,12 @@ pub(crate) fn lengthen_lower_leg(
     true
 }
 
-/// Cuts the foot off the end of a leg of two or more bones with an ankle: the
-/// last 20 to 40% of the last bone becomes a foot segment on its own joint.
-/// A muscle across the ankle runs a quarter cycle behind the muscles of the
-/// leg (the foot pushes off after the knee extends). A leg with an ankle can
-/// keep the foot flat on the ground while the shank swings over it.
+/// Gives a leg of two or more bones an ankle: the last 20 to 40% of the last
+/// bone becomes a foot segment on its own joint. A new muscle across the ankle
+/// takes the timing of the leg's strongest muscle (`leg_template`) with its
+/// phase raised by 0.25. A leg with an ankle can keep the foot flat on the
+/// ground while the shank swings over it. The last bone must be at least 0.1
+/// long, and the body needs room for a node and a muscle.
 pub(crate) fn add_ankle_joint(
     c: &mut Creature,
     cfg: &Config,
@@ -214,12 +219,14 @@ pub(crate) fn add_ankle_joint(
     true
 }
 
-/// Bends a leg of one straight bone at its middle: the bone becomes a thigh
-/// and a shank with a knee that sticks out sideways by 12 to 30% of the
-/// length, and a muscle across the knee runs a quarter cycle behind the
-/// muscles that move the leg. Sims (1994) and Lipson and Pollack (2000) got
-/// their walkers from jointed legs, and a bent leg can shorten in the swing
-/// and extend in the stance, which a straight stick cannot.
+/// Bends a leg of one straight bone near its middle: the bone is cut at 40 to
+/// 60% of its length into a thigh and a shank, and the knee between them sticks
+/// out sideways by 12 to 30% of the length. A new muscle across the knee takes
+/// the timing of the leg's strongest muscle (`leg_template`) with its phase
+/// raised by 0.25. Sims (1994) and Lipson and Pollack (2000) got their walkers
+/// from jointed legs, and a bent leg can shorten in the swing and extend in the
+/// stance, which a straight stick cannot. The bone must be at least 0.14 long,
+/// and the body needs room for a node and a muscle.
 pub(crate) fn bend_stick_leg_at_knee(
     c: &mut Creature,
     cfg: &Config,
@@ -268,10 +275,12 @@ pub(crate) fn bend_stick_leg_at_knee(
 }
 
 /// Stops a bent knee from extending past the pose it starts in (a 0.02 to 0.08
-/// rad allowance) and widens its flexion to at least 0.7 rad. The knee can
-/// fold to bring the foot up in the swing, and it acts as a strut that takes
-/// the load in the stance, as the knee of a mammal does: a joint with a
-/// stop turns muscle pull into support without a muscle holding it.
+/// rad allowance) and raises its flexion limit to a draw of 0.7 to 1.2 rad when
+/// that is wider. The knee must bend 0.12 rad or more, and a knee with under
+/// 0.1 rad of extension range is left alone. The knee can fold to bring the
+/// foot up in the swing, and it acts as a strut that takes the load in the
+/// stance, as the knee of a mammal does: a joint with a stop turns muscle pull
+/// into support without a muscle holding it.
 pub(crate) fn lock_knee_extension(
     c: &mut Creature,
     _cfg: &Config,
@@ -307,10 +316,11 @@ pub(crate) fn lock_knee_extension(
 }
 
 /// Folds a straight leg into a zigzag: the lower part turns about a joint by
-/// 0.5 to 1.0 rad, so the foot comes up under the body and the leg is a
-/// shorter, springier Z. Folded legs swing through with little foot lift
-/// (a cat or a dog hind leg), and a compliant bent leg stores and returns
-/// energy as the spring of a spring mass walker does (Full and Koditschek).
+/// 0.5 to 1.0 rad to a random side, so the foot comes up and the leg is a
+/// shorter, springier Z. The joint must bend less than 0.25 rad to start with.
+/// Folded legs swing through with little foot lift (a cat or a dog hind leg),
+/// and a compliant bent leg stores and returns energy as the spring of a
+/// spring mass walker does (Full and Koditschek).
 pub(crate) fn fold_leg_zigzag(
     c: &mut Creature,
     _cfg: &Config,
@@ -338,10 +348,11 @@ pub(crate) fn fold_leg_zigzag(
     true
 }
 
-/// Straightens a bent leg into a column: the lower part turns back in line
-/// with the bone above it. A straight leg holds the body up with bone and not
-/// with muscle, as the legs of an elephant do, and it reaches farthest for a
-/// given hip swing. The knee keeps its joint range.
+/// Straightens a bent leg into a column: at a joint that bends 0.3 rad or more,
+/// the lower part turns back by 90 to 100% of the bend. A straight leg holds
+/// the body up with bone and not with muscle, as the legs of an elephant do,
+/// and it reaches farthest for a given hip swing. The knee keeps its joint
+/// range.
 pub(crate) fn straighten_leg_column(
     c: &mut Creature,
     _cfg: &Config,
