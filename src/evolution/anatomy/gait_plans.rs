@@ -317,11 +317,12 @@ fn template_of(c: &Creature, legs: &[BoneIds]) -> Option<Muscle> {
     strongest(c, &muscles).map(|i| c.muscles[i])
 }
 
-/// Turns the body into a quadruped: legs are copied onto the trunk until
-/// there are four, spread along it, and the four step in one of four
-/// four-legged gaits: a trot (diagonals together), a walk (a quarter cycle
-/// between the legs), a bound (pairs together) or a rotary gallop. A body
-/// with four or more legs only takes the new timing.
+/// Turns the body into a quadruped. Legs are copied onto the trunk, spread
+/// along it, until there are four. Then the legs take one of four gaits at
+/// random: a trot (diagonals together), a walk (a quarter cycle between the
+/// legs in turn), a bound (pairs together) or a rotary gallop. A body with four
+/// legs or more only takes the new timing. It fails if fewer than three legs
+/// result.
 pub(crate) fn quadruped_plan(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let gait = rng.index(4);
     plan_legs(c, cfg, rng, 4, 3, |i| match gait {
@@ -332,19 +333,22 @@ pub(crate) fn quadruped_plan(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
     })
 }
 
-/// Turns the body into a hexapod: legs are copied onto the trunk until there
+/// Turns the body into a hexapod. Legs are copied onto the trunk until there
 /// are six, and the legs step as two tripods. Insects hold three legs on the
 /// ground at every moment, so the body is always statically stable, which is
-/// why the tripod gait is a safe place to start.
+/// why the tripod gait is a safe place to start. A body with six legs or more
+/// only takes the new timing. It fails if fewer than five legs result.
 pub(crate) fn hexapod_tripod(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     plan_legs(c, cfg, rng, 6, 5, alternate)
 }
 
-/// Turns the body into a long many-legged one: legs are copied until there
-/// are eight (when the room allows) and the legs step in a wave, each pair a
-/// fixed step of 0.08 to 0.2 of a cycle after the one before it, and the two
-/// legs of a pair half a cycle apart. This is the metachronal wave of a
-/// centipede, and the phase lag of a central pattern generator down a chain.
+/// Turns the body into a many-legged one, a myriapod. Legs are copied until
+/// there are eight (when the room allows) and the legs step in a wave. Each
+/// pair is a fixed step of 0.08 to 0.2 of a cycle later than the pair behind
+/// it, or earlier in a random half of the calls, and the two legs of a pair are
+/// half a cycle apart. This is the metachronal wave of a centipede, and the
+/// phase lag of a central pattern generator down a chain. It fails if fewer
+/// than four legs result.
 pub(crate) fn myriapod_wave(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let step = rng.range(0.08, 0.2) * if rng.unit() < 0.5 { -1.0 } else { 1.0 };
     plan_legs(c, cfg, rng, 8, 4, |i| {
@@ -353,11 +357,15 @@ pub(crate) fn myriapod_wave(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
 }
 
 /// Turns the body into a hopper like a kangaroo. The two rearmost legs grow
-/// 1.15 to 1.4 times longer, get stronger muscles with an elastic tendon (the
-/// Achilles tendon of a hopper stores and returns the energy of a landing) and
-/// push together. Any other legs shrink to 0.6 to 0.85 and step a quarter
-/// cycle off. A tail grows from the rear of the trunk and swings half a cycle
-/// from the hop, with a weight near its end, to balance the body.
+/// 1.15 to 1.4 times longer, get muscles 1.1 to 1.4 times stiffer and a tendon
+/// raised to 0.4 to 0.9 (the Achilles tendon of a hopper stores and returns the
+/// energy of a landing), and push together. Any other legs shrink to 0.6 to
+/// 0.85 and step a quarter cycle off. A tail grows backward from the rearmost
+/// trunk node higher than 0.05. It is 0.8 to 1.4 times the mean bone length of
+/// the rear legs, swings half a cycle from the hop and has a weight near its
+/// end, to balance the body. One idle limb tip of the old body goes, so the body
+/// does not grow. It fails if the body has fewer than two legs or no room for
+/// the tail.
 pub(crate) fn kangaroo_hopper(
     c: &mut Creature,
     cfg: &Config,
@@ -389,6 +397,7 @@ pub(crate) fn kangaroo_hopper(
     else {
         return false;
     };
+    // Backward, from 0.1 rad above the horizontal to 0.3 rad below it.
     let angle = PI + rng.range(-0.1, 0.3);
     let mass = rng.range(0.05, 0.12);
     let reach = length * rng.range(0.8, 1.4);
@@ -411,9 +420,10 @@ pub(crate) fn kangaroo_hopper(
 
 /// Turns the body into a swinger like a gibbon walking upright. The two
 /// foremost legs become long arms, 1.3 to 1.6 times longer, with joint ranges
-/// and muscle strokes widened by a third, and they swing hand over hand, half
-/// a cycle apart. Long pendulum limbs swing at a low natural frequency, so
-/// each swing covers a long stride.
+/// 1.35 times wider (within the joint limit) and muscle strokes 1.3 times
+/// longer, and they swing hand over hand, half a cycle apart. Long pendulum
+/// limbs swing at a low natural frequency, so each swing covers a long stride.
+/// It fails if the body has fewer than two legs.
 pub(crate) fn gibbon_swinger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = walkers(c);
     if legs.len() < 2 {
@@ -441,10 +451,13 @@ pub(crate) fn gibbon_swinger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
 }
 
 /// Turns the body into a two-legged runner with a counterweight. The two
-/// longest legs step half a cycle apart. A short arm with a weight at its end
-/// grows from the highest trunk node and swings half a cycle from the first
-/// leg, so its angular momentum cancels the legs' swing about the vertical, as
-/// the arms of a running person do.
+/// longest legs step half a cycle apart, and the other legs keep their timing.
+/// A short arm with a weight at its end grows from the highest trunk node. It
+/// is 0.6 to 0.9 times the mean bone length of the two legs and swings half a
+/// cycle from the rearmost of them, so that its angular momentum works against
+/// the swing of the legs, as the arms of a running person do. One idle limb tip
+/// of the old body goes, so the body does not grow. It fails if the body has
+/// fewer than two legs or no room for the arm.
 pub(crate) fn counterweight_runner(
     c: &mut Creature,
     cfg: &Config,
@@ -456,6 +469,7 @@ pub(crate) fn counterweight_runner(
         return false;
     }
     let total = |l: &BoneIds| l.iter().map(|&b| c.bones[b].rest_length).sum::<f32>();
+    // The two longest legs, the rearmost first.
     legs.sort_stable_by(|p, q| total(q).total_cmp(&total(p)));
     let mut pair = [legs[0], legs[1]];
     pair.sort_by(|p, q| hip_x(c, p).total_cmp(&hip_x(c, q)));
@@ -471,6 +485,7 @@ pub(crate) fn counterweight_runner(
     else {
         return false;
     };
+    // Forward, from 0.2 rad below the horizontal to 0.7 rad above it.
     let angle = rng.range(-0.2, 0.7);
     let mass = rng.range(0.08, 0.2);
     let length = mean_bone(c, &pair) * rng.range(0.6, 0.9);
@@ -491,10 +506,11 @@ pub(crate) fn counterweight_runner(
     commit(c, next, cfg, rng)
 }
 
-/// Drops a pair of neighbouring legs, the pair with the least muscle drive of
-/// two tried, from a body with four or more legs, and spaces the remaining legs
-/// as one alternating gait. Fewer legs cost fewer nodes, and a plan with
-/// fewer legs keeps its stability only if the rest alternate.
+/// Drops a pair of neighbouring legs from a body with four or more legs and
+/// seven or more nodes. Two pairs are tried and the one with the least muscle
+/// drive goes. The remaining legs are retimed as one alternating gait. Fewer
+/// legs cost fewer nodes, and a plan with fewer legs keeps its stability only
+/// if the rest alternate.
 pub(crate) fn shed_leg_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = walkers(c);
     if legs.len() < 4 || c.nodes.len() < 7 {
@@ -517,10 +533,11 @@ pub(crate) fn shed_leg_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
     commit(c, next, cfg, rng)
 }
 
-/// Adds a pair of legs at one new trunk node: two copies of a leg, the second
-/// reflected, half a cycle apart from each other, the first half a cycle
-/// from the leg they were copied from. A body with a pair of legs becomes a
-/// body with two, as a hexapod or a centipede gains a segment.
+/// Adds a pair of legs at another trunk node: two copies of a random leg, one
+/// of them reflected (chosen at random). The first copy steps half a cycle from
+/// the leg and the second in its phase, so the two copies are half a cycle
+/// apart. The body gains a segment of two legs, as a hexapod or a centipede
+/// does. Up to half as many older limb tips as new nodes go.
 pub(crate) fn append_leg_pair(
     c: &mut Creature,
     cfg: &Config,
@@ -552,11 +569,12 @@ pub(crate) fn append_leg_pair(
     commit(c, next, cfg, rng)
 }
 
-/// Fuses two neighbouring legs into one strong leg. Of the two legs whose hips
-/// are nearest, the one with more drive stays, 1.15 to 1.3 times longer with
-/// its muscles 1.3 to 1.6 times stiffer, and the other goes. Needs three or
-/// more legs. One thick leg has the force of two without the bones and joints
-/// of the second, as the single toe of a horse does.
+/// Fuses two neighbouring legs into one strong leg. Two pairs of neighbours are
+/// tried and the pair whose hips are nearer in x is fused. The leg of the pair
+/// with more drive stays, 1.15 to 1.3 times longer with its muscles 1.3 to 1.6
+/// times stiffer, and the other goes. Needs three or more legs. One thick leg
+/// has the force of two without the bones and joints of the second, as the
+/// single toe of a horse does.
 pub(crate) fn fuse_legs_into_one(
     c: &mut Creature,
     cfg: &Config,
@@ -583,10 +601,13 @@ pub(crate) fn fuse_legs_into_one(
     commit(c, next, cfg, rng)
 }
 
-/// Splits a leg into two at the same hip. The copy is reflected and the two
-/// lean apart by 0.12 to 0.3 rad, each with muscles three quarters as stiff,
-/// and the two step together or half a cycle apart. Two thin legs under one
-/// hip widen the stance and can alternate where one leg could not.
+/// Splits a leg into two at the same hip. The copy is reflected. The original
+/// turns counterclockwise and the copy clockwise, each by 0.12 to 0.3 rad, so
+/// legs that hang down spread apart. Every muscle on the original, and every
+/// copied muscle whose first bone is the copy's root, becomes three quarters as
+/// stiff. The two legs step together or half a cycle apart. Two thin legs under
+/// one hip widen the stance and can alternate where one leg could not. Up to
+/// half as many older limb tips as new nodes go.
 pub(crate) fn split_leg_in_two(
     c: &mut Creature,
     cfg: &Config,
@@ -617,6 +638,8 @@ pub(crate) fn split_leg_in_two(
     keep_strokes(&mut next, &pose);
     let mut both = BoneIds::from_slice(limb);
     both.extend(branch(&next, copy));
+    // The muscles before `before` are the original's. A copied muscle counts
+    // when it starts at the copy's root bone.
     for i in muscles_on(&next, &both, false) {
         if i < before || next.muscles[i].bone_a as usize == copy {
             let m = &mut next.muscles[i];
@@ -628,10 +651,11 @@ pub(crate) fn split_leg_in_two(
     commit(c, next, cfg, rng)
 }
 
-/// Reduces a body with three or more legs to a biped: the two legs with the
-/// most drive stay, 1.1 times longer, step half a cycle apart, and every other
-/// leg goes. Walking on two legs frees the rest of the body for a balance arm
-/// or a tail, and costs fewer nodes.
+/// Reduces a body with three or more legs to a biped. The two legs with the
+/// most drive stay, 1.05 to 1.15 times longer, and step half a cycle apart.
+/// Every other leg goes. It fails if that would leave fewer than three nodes.
+/// Walking on two legs frees the rest of the body for a balance arm or a tail,
+/// and costs fewer nodes.
 pub(crate) fn reduce_to_biped(
     c: &mut Creature,
     cfg: &Config,
@@ -642,6 +666,7 @@ pub(crate) fn reduce_to_biped(
     if legs.len() < 3 {
         return false;
     }
+    // Most drive first, so the first two stay.
     legs.sort_stable_by(|p, q| limb_drive(c, q).total_cmp(&limb_drive(c, p)));
     let mut next = c.clone();
     scale_legs(&mut next, &legs[..2], rng.range(1.05, 1.15));
@@ -665,9 +690,9 @@ pub(crate) fn reduce_to_biped(
 }
 
 /// Makes every leg push at once, as a gazelle does when it stots: all legs
-/// take one phase, and their muscles get an elastic tendon of 0.4 to 0.8 so
-/// each landing is stored and returned in the next push. Needs three or more
-/// legs.
+/// take the phase of the rearmost, and the tendon of their muscles is raised to
+/// 0.4 to 0.8 so each landing is stored and returned in the next push. Needs
+/// three or more legs.
 pub(crate) fn pronking_stot(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = walkers(c);
     if legs.len() < 3 {
@@ -686,10 +711,11 @@ pub(crate) fn pronking_stot(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
 }
 
 /// Gives every leg of two or more bones the proportions of a runner on its
-/// toes: the lowest bone 1.3 to 1.7 times longer, the bone at the hip 0.7 to
-/// 0.9 as long, and a tendon of at least 0.3 in the leg's muscles. Long light
-/// distal segments and short muscled proximal ones are how hoofed runners
-/// lengthen their stride without a heavier swing (Hildebrand, Alexander).
+/// toes: the bone at the foot 1.3 to 1.7 times longer, the bone at the hip 0.7
+/// to 0.9 as long, and a tendon of at least 0.3 in the leg's muscles. Long
+/// light distal segments and short muscled proximal ones are how hoofed runners
+/// lengthen their stride without a heavier swing (Hildebrand, Alexander). It
+/// fails if no leg has two bones.
 pub(crate) fn unguligrade_legs(
     c: &mut Creature,
     cfg: &Config,
@@ -707,6 +733,8 @@ pub(crate) fn unguligrade_legs(
         let (upper, lower) = (leg[0], leg[1]);
         let hip = next.nodes[next.bones[upper].a as usize];
         let knee = next.nodes[next.bones[upper].b as usize];
+        // The upper bone scales about the hip. The knee moves by `offset`, and
+        // so does everything below it.
         let offset = [
             (knee.x - hip.x) * (proximal - 1.0),
             (knee.y - hip.y) * (proximal - 1.0),
