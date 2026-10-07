@@ -47,7 +47,7 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 /// For each bone, whether it is in a leg.
 fn leg_flags(c: &Creature) -> [bool; MAX_NODES] {
     let mut flags = [false; MAX_NODES];
-    for limb in leaf_limbs(c) {
+    for limb in leaf_limbs(c).iter().copied() {
         for b in limb {
             flags[b] = true;
         }
@@ -124,7 +124,7 @@ fn tail_limb(c: &Creature) -> Option<BoneIds> {
         .iter()
         .map(|n| n.x * dir)
         .fold(f32::MIN, f32::max);
-    leaf_limbs(c).into_iter().find(|limb| {
+    leaf_limbs(c).iter().copied().find(|limb| {
         let t = c.nodes[c.bones[limb[limb.len() - 1]].b as usize];
         t.x * dir >= rearmost - 0.02 && t.y - 0.5 * t.diameter > 0.05
     })

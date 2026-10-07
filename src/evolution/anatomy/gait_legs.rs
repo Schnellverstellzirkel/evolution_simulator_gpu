@@ -626,7 +626,7 @@ pub(crate) fn lag_knee_behind_hip(
 ) -> bool {
     let lag = if rng.unit() < 0.7 { 0.25 } else { 0.75 };
     let mut changed = false;
-    for leg in leaf_limbs(c) {
+    for leg in leaf_limbs(c).iter().copied() {
         if leg.len() < 2 {
             continue;
         }

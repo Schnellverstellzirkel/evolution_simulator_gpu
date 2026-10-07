@@ -53,7 +53,8 @@ fn active(m: &Muscle) -> bool {
 fn legs_with_hip(c: &Creature) -> Vec<(BoneIds, usize)> {
     let parents = parent_bones(c);
     leaf_limbs(c)
-        .into_iter()
+        .iter()
+        .copied()
         .filter_map(|limb| {
             let above = parents[c.bones[limb[0]].a as usize]?;
             Some((limb, above))

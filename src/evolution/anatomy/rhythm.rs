@@ -419,25 +419,28 @@ pub(crate) fn touchdown_package(
     _cx: &Context,
 ) -> bool {
     let parents = parent_bones(c);
-    let feet: Bounded<(usize, MuscleIds), MAX_NODES> = (1..c.nodes.len())
+    // Feet as (node, bone above it): the muscle lists are small enough to
+    // rebuild for the chosen foot alone, which keeps this array small.
+    let feet: Bounded<(usize, usize), MAX_NODES> = (1..c.nodes.len())
         .filter(|&n| degree(c, n) == 1)
-        .filter_map(|n| Some((n, muscles_on(c, &[parents[n]?], false))))
-        .filter(|(_, muscles)| !muscles.is_empty())
+        .filter_map(|n| Some((n, parents[n]?)))
+        .filter(|&(_, bone)| !muscles_on(c, &[bone], false).is_empty())
         .collect();
     if feet.is_empty() {
         return false;
     }
-    let (foot, muscles) = &feet[rng.index(feet.len())];
+    let (foot, bone) = feet[rng.index(feet.len())];
+    let muscles = muscles_on(c, &[bone], false);
     // The resets keep the phase differences, so after a landing the muscles
     // run in the same order and spacing as before.
     let reset = rng.unit();
     let first = c.muscles[muscles[0]].phase;
-    for &i in muscles {
+    for &i in &muscles {
         let m = c.muscles[i];
         let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
         let sensor = [a.a, a.b, b.a, b.b]
             .iter()
-            .position(|&n| n as usize == *foot)
+            .position(|&n| n as usize == foot)
             .expect("the muscle is on the foot's bone");
         let m = &mut c.muscles[i];
         m.sensor = sensor as u32;

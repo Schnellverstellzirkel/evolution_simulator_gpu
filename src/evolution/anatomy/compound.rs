@@ -1033,7 +1033,8 @@ pub(crate) fn mirrored_limb_pair(
     _cx: &Context,
 ) -> bool {
     let mut legs: super::Limbs = leaf_limbs(c)
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|limb| limb.len() <= 2 && room(c, cfg, 2 * limb.len(), 0))
         .collect();
     legs.sort_stable_by(|x, y| tip_y(c, x).total_cmp(&tip_y(c, y)));

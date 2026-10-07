@@ -45,7 +45,11 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 /// The legs (leaf limbs of at least two bones), from the rearmost foot to the
 /// foremost.
 fn legs_by_x(c: &Creature) -> Limbs {
-    let mut legs: Limbs = leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect();
+    let mut legs: Limbs = leaf_limbs(c)
+        .iter()
+        .copied()
+        .filter(|l| l.len() >= 2)
+        .collect();
     legs.sort_stable_by(|p, q| tip_x(c, p).total_cmp(&tip_x(c, q)));
     legs
 }

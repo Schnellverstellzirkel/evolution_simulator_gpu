@@ -55,7 +55,11 @@ fn heading(c: &Creature, b: usize) -> f32 {
 
 /// Legs with a foot: leaf limbs of at least two bones.
 fn feet_legs(c: &Creature) -> Vec<BoneIds> {
-    leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect()
+    leaf_limbs(c)
+        .iter()
+        .copied()
+        .filter(|l| l.len() >= 2)
+        .collect()
 }
 
 /// Turns the branch of bone `j` by `t` in the starting pose and moves the
@@ -459,7 +463,8 @@ pub(crate) fn shorten_dragging_tip(
     _cx: &Context,
 ) -> bool {
     let tips: BoneIds = leaf_limbs(c)
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|l| l.len() == 1)
         .map(|l| l[0])
         .filter(|&b| c.nodes[c.bones[b].b as usize].y < 0.12 && c.bones[b].rest_length > 0.12)
