@@ -235,7 +235,9 @@ pub fn f16_to_f32(h: u16) -> f32 {
     };
     f32::from_bits(bits)
 }
-/// Single to IEEE half precision, rounded to nearest even, for the dump files.
+/// Single to IEEE half precision, rounded to nearest even. The rungs keep their
+/// features and the rhythm period as halves, and the dump files store the
+/// period as a half.
 pub fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -270,34 +272,53 @@ pub fn f32_to_f16(v: f32) -> u16 {
     sign | out as u16
 }
 
-/// One group of creatures, ready for upload.
+/// One group of creatures packed for upload by `kernel::pack`. The vectors
+/// `slots`, `creatures` and `info` list the creatures in packed order, which
+/// is sorted by muscle count, then node count, then population index. The
+/// records the kernel reads are in `wave`.
 pub struct LaneBatch {
+    /// Node slots of a creature in a recorded frame (`kernel::MAX_NODES`). It
+    /// also names the kernel's lane class.
     pub capacity: usize,
     /// Position of each packed creature within the caller's index slice.
     pub slots: Vec<usize>,
     /// Population index of each packed creature.
     pub creatures: Vec<usize>,
+    /// Per-lane node state for the old lane-group kernel. Empty now, because
+    /// `kernel::pack` fills `wave` instead.
     pub nodes: Vec<Node>,
+    /// For each packed creature: its node count, its bone count, its muscle
+    /// count and its quake hash (`physics::quake_hash` of its id).
     pub info: Vec<[u32; 4]>,
+    /// Per-tile offsets and sizes in the muscle and bone buffers of the old
+    /// lane-group kernel. Empty now.
     pub tiles: Vec<[u32; 4]>,
+    /// Per-lane muscle records for the old lane-group kernel. Empty now.
     pub muscles: Vec<f32>,
-    /// Fields per muscle in `muscles` (`kernel::MUSCLE_FIELDS`).
+    /// Floats per muscle record (`kernel::MUSCLE_FIELDS`), as packed in
+    /// `wave`.
     pub muscle_fields: usize,
+    /// Per-lane bone records for the old lane-group kernel. Empty now.
     pub bones: Vec<f32>,
-    /// Behavior totals to resume from; `None` starts from zero.
+    /// Behavior totals to resume a trial from. `kernel::pack` leaves it
+    /// `None`, because the kernel runs each trial whole.
     pub results: Option<Vec<GpuResult>>,
-    /// The CUDA kernel's records (`kernel::pack`); the
-    /// per-lane fields above are then empty.
+    /// The CUDA kernel's records (`kernel::pack`). `nodes`, `tiles`, `muscles`
+    /// and `bones` are then empty.
     pub wave: Option<crate::kernel::WavePack>,
 }
 
-/// Length in `[f32; 2]` slots of one recorded frame of `batch`: the node
-/// positions (`capacity` slots), then an (energy, force) pair per muscle and a
-/// (normal, friction) contact force per node, and last the broken joints:
-/// `2 * capacity + muscles + 1` slots, the muscle count being the batch's
-/// largest (a replay batch holds one creature). The last slot holds the bits
-/// of the bones whose joint is past its break angle (the kernel's rule), bones
-/// 0 to 31 in the first word and 32 to 63 in the second, as `f32` bits.
+/// Length in `[f32; 2]` slots of one recorded frame of `batch`, which is
+/// `2 * capacity + muscles + 1`. The slots hold, in order:
+///
+/// - the node positions, `capacity` slots
+/// - an (energy, force) pair for each muscle, `muscles` slots, where
+///   `muscles` is the batch's largest muscle count (a replay batch holds one
+///   creature)
+/// - a (normal, friction) contact force for each node, `capacity` slots
+/// - the broken joints, one slot: the bits of the bones whose joint is past
+///   its break angle (the kernel's rule), bones 0 to 31 in the first word and
+///   32 to 63 in the second, as `f32` bits
 pub fn frame_stride(batch: &LaneBatch) -> usize {
     let muscles = batch.info.iter().map(|i| i[2] as usize).max().unwrap_or(0);
     2 * batch.capacity + muscles + 1
