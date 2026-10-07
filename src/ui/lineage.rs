@@ -77,7 +77,6 @@ impl App {
                         ui,
                         step,
                         self.lineage.get(k + 1),
-                        true,
                         shown == Some(step.creature.id),
                         theme,
                         Vec2::new(ui.available_width(), 120.),
@@ -123,7 +122,6 @@ fn paint_lineage_tile(
     ui: &mut egui::Ui,
     step: &crate::worker::LineageStep,
     parent: Option<&crate::worker::LineageStep>,
-    big: bool,
     current: bool,
     theme: Theme,
     size: Vec2,
@@ -162,7 +160,7 @@ fn paint_lineage_tile(
         Align2::LEFT_TOP,
         format!("{:.2} m", step.fitness),
         FontId::proportional(19.),
-        if big { theme.accent } else { theme.ink },
+        theme.accent,
     );
     painter.text(
         Pos2::new(text_x, rect.top() + 54.),
