@@ -1,24 +1,30 @@
-//! A vector with a fixed capacity that lives inline, without a heap
-//! allocation. Creatures hold their genes in these (`evolution::Creature`),
-//! so breeding a child never calls the allocator, and a clone copies only
-//! the elements in use.
-//!
-//! Elements are `Copy`, so nothing ever needs dropping. Going past the
-//! capacity is a bug, as indexing past the end of a slice is: `push` and the
-//! other growing methods panic. `try_push` reports it instead.
+//! `Bounded<T, N>` is a vector of at most `N` `Copy` items that lives inline,
+//! with no heap allocation. `evolution` builds `Nodes`, `Bones` and `Muscles`
+//! from it for the genes of a `Creature`, and the anatomy operators use it for
+//! short lists. Going past the capacity is a bug, so `push` and the other
+//! growing methods panic. `try_push` returns false instead.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 
+/// A vector of at most `N` items of a `Copy` type. The items live inside the
+/// value, so it needs no heap. It derefs to a slice of the items in use, so
+/// `len`, `iter`, `get`, indexing and the other slice methods work on it.
 pub struct Bounded<T: Copy, const N: usize> {
+    /// How many items are in use. The first `len` entries of `items` are
+    /// initialized and the rest are not.
     len: u32,
+    /// The storage. `MaybeUninit` lets an empty array exist without a value
+    /// of `T`.
     items: [MaybeUninit<T>; N],
 }
 
 impl<T: Copy, const N: usize> Bounded<T, N> {
+    /// The most items an array of this type holds. It is `N`.
     pub const CAPACITY: usize = N;
 
+    /// An empty array.
     pub const fn new() -> Self {
         Self {
             len: 0,
@@ -31,16 +37,20 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         out.extend_from_slice(items);
         out
     }
+    /// The capacity of the array, which is `N` for every value of the type.
     pub const fn capacity(&self) -> usize {
         N
     }
+    /// True when the array holds `N` items, so `push` would panic.
     pub fn is_full(&self) -> bool {
         self.len as usize == N
     }
+    /// The items in use.
     pub fn as_slice(&self) -> &[T] {
         // SAFETY: the first `len` items are initialized.
         unsafe { std::slice::from_raw_parts(self.items.as_ptr().cast::<T>(), self.len as usize) }
     }
+    /// The items in use, as a mutable slice.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: the first `len` items are initialized.
         unsafe {
@@ -58,10 +68,12 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         self.len += 1;
         true
     }
+    /// Appends `value`. Panics when the array is full.
     #[inline]
     pub fn push(&mut self, value: T) {
         assert!(self.try_push(value), "Bounded<_, {N}> is full");
     }
+    /// Removes and returns the last item, or `None` when the array is empty.
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -70,6 +82,8 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         // SAFETY: the item was initialized and is now past the end.
         Some(unsafe { self.items[self.len as usize].assume_init() })
     }
+    /// Inserts `value` at `index` and moves the items from there on up by one.
+    /// Panics when `index` is past the end or the array is full.
     pub fn insert(&mut self, index: usize, value: T) {
         let len = self.len as usize;
         assert!(index <= len, "insert index {index} past length {len}");
@@ -78,6 +92,8 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         self.items[index] = MaybeUninit::new(value);
         self.len += 1;
     }
+    /// Removes and returns the item at `index`. The items after it move down
+    /// by one. Panics when `index` is out of range.
     pub fn remove(&mut self, index: usize) -> T {
         let len = self.len as usize;
         assert!(index < len, "remove index {index} past length {len}");
@@ -86,6 +102,8 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         self.len -= 1;
         value
     }
+    /// Removes and returns the item at `index`. The last item takes its
+    /// place, so the order changes. Panics when `index` is out of range.
     pub fn swap_remove(&mut self, index: usize) -> T {
         let len = self.len as usize;
         assert!(index < len, "swap_remove index {index} past length {len}");
@@ -94,11 +112,14 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         self.len -= 1;
         value
     }
+    /// Keeps the first `len` items. Does nothing when there are no more than
+    /// `len`.
     pub fn truncate(&mut self, len: usize) {
         if len < self.len as usize {
             self.len = len as u32;
         }
     }
+    /// Removes every item.
     pub fn clear(&mut self) {
         self.len = 0;
     }
@@ -106,8 +127,8 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
         self.retain_mut(|item| keep(item));
     }
-    /// Keeps the items for which `keep` is true, in order; `keep` may change
-    /// the items it sees.
+    /// Keeps the items for which `keep` is true, in order. `keep` may change
+    /// the item it sees, and the item is kept as changed.
     pub fn retain_mut(&mut self, mut keep: impl FnMut(&mut T) -> bool) {
         let len = self.len as usize;
         let mut kept = 0;
@@ -121,6 +142,7 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         }
         self.len = kept as u32;
     }
+    /// Appends a copy of `items`. Panics when they do not fit.
     pub fn extend_from_slice(&mut self, items: &[T]) {
         let len = self.len as usize;
         assert!(
@@ -128,14 +150,15 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
             "Bounded<_, {N}> is full: {len} + {}",
             items.len()
         );
-        // SAFETY: MaybeUninit<T> has the layout of T.
+        // SAFETY: `MaybeUninit<T>` has the layout of `T`.
         let source = unsafe {
             std::slice::from_raw_parts(items.as_ptr().cast::<MaybeUninit<T>>(), items.len())
         };
         self.items[len..len + items.len()].copy_from_slice(source);
         self.len += items.len() as u32;
     }
-    /// Sets the length to `len`, filling new places with `value`.
+    /// Sets the length to `len`, filling new places with `value`. A smaller
+    /// `len` cuts the array short. Panics when `len` is more than `N`.
     pub fn resize(&mut self, len: usize, value: T) {
         assert!(len <= N, "Bounded<_, {N}> cannot hold {len}");
         for index in self.len as usize..len {
@@ -143,15 +166,17 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         }
         self.len = len as u32;
     }
-    /// `len` copies of `value`.
+    /// `len` copies of `value`. Panics when `len` is more than `N`.
     pub fn filled(len: usize, value: T) -> Self {
         let mut out = Self::new();
         out.resize(len, value);
         out
     }
-    /// A stable sort by `compare`, in place and without allocating (the
-    /// standard stable sort allocates a buffer). Insertion sort: the arrays
-    /// here hold at most a few hundred items.
+    /// Sorts the items by `compare`, in place and without allocating. Equal
+    /// items keep their order. The standard stable sort may allocate a buffer,
+    /// so this is an insertion sort instead. Its cost grows with the square of
+    /// the length. That is fine for the arrays sorted in this game, which hold
+    /// at most about 200 items.
     pub fn sort_stable_by(&mut self, mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
         let items = self.as_mut_slice();
         for i in 1..items.len() {
@@ -162,6 +187,7 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
             }
         }
     }
+    /// A `Vec` holding a copy of the items in use.
     pub fn to_vec(&self) -> Vec<T> {
         self.as_slice().to_vec()
     }
