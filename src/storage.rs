@@ -17,6 +17,29 @@ use std::{
     sync::Arc,
 };
 
+/// A hash of keys that are spread out or counted up already (creature ids,
+/// plan keys): one rotate and one multiply (FxHash), far cheaper than the
+/// default SipHash. Only for maps and sets whose iteration order never
+/// decides a result (the default hash's order changes with every run
+/// anyway).
+#[derive(Default)]
+pub struct KeyHasher(u64);
+impl std::hash::Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+pub type KeyMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<KeyHasher>>;
+pub type KeySet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<KeyHasher>>;
+
 mod archive;
 mod breeding;
 mod confirm;
@@ -210,7 +233,7 @@ pub struct Experiment {
     pub islands: Vec<QdArchive>,
     /// Every creature that entered an archive, keyed by creature id, with its
     /// parent and the change that produced it. Pruned to living elites' ancestors.
-    pub lineage: HashMap<u64, Ancestor>,
+    pub lineage: KeyMap<Ancestor>,
     /// Each island's best distance so far and the generation it was set.
     pub island_progress: Vec<(f32, u32)>,
     /// Per island, what its nursery of new random bodies graduated this
@@ -366,7 +389,7 @@ impl Experiment {
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
-            lineage: HashMap::new(),
+            lineage: KeyMap::default(),
             island_progress: Vec::new(),
             graduations: Vec::new(),
             reshaped_graduations: Vec::new(),

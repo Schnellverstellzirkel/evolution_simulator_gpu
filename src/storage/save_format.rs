@@ -44,7 +44,7 @@ struct SmallLoad {
     qd_version: u32,
     breed_round: u64,
     islands: Vec<QdArchive>,
-    lineage: HashMap<u64, Ancestor>,
+    lineage: KeyMap<Ancestor>,
     island_progress: Vec<(f32, u32)>,
     reseed: Reseed,
     ring: RingShape,
@@ -59,7 +59,7 @@ struct SmallLoad {
 /// back to `ANCESTRY_DEPTH`, which is as far as anything shows them. The
 /// ancestors of the other island elites are left out.
 struct SavedLineage<'a> {
-    lineage: &'a HashMap<u64, Ancestor>,
+    lineage: &'a KeyMap<Ancestor>,
     /// Which records to write, and whether each writes its creature.
     keep: HashMap<u64, bool>,
 }

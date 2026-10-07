@@ -114,7 +114,6 @@ impl Experiment {
     /// island's fastest `ISLAND_LEADERS`); the other records keep their links
     /// and numbers and lose their genes, as in a save.
     pub(super) fn prune_lineage(&mut self) {
-        use std::collections::HashSet;
         let elites = || {
             self.archive
                 .entries
@@ -129,7 +128,7 @@ impl Experiment {
             shown.extend(fastest.iter().take(ISLAND_LEADERS).map(|x| x.creature.id));
         }
         // The ids within `ANCESTRY_DEPTH` steps of `start`, level by level.
-        let reach = |start: &[u64], within: &mut HashSet<u64>| {
+        let reach = |start: &[u64], within: &mut KeySet| {
             let mut frontier: Vec<u64> = start
                 .iter()
                 .copied()
@@ -150,9 +149,9 @@ impl Experiment {
                 frontier = next;
             }
         };
-        let mut keep: HashSet<u64> = HashSet::new();
+        let mut keep = KeySet::default();
         reach(&living, &mut keep);
-        let mut with_genes: HashSet<u64> = HashSet::new();
+        let mut with_genes = KeySet::default();
         reach(&shown, &mut with_genes);
         self.lineage.retain(|id, _| keep.contains(id));
         for (id, record) in self.lineage.iter_mut() {
