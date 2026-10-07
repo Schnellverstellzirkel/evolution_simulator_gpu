@@ -570,8 +570,8 @@ pub fn tab(ui: &mut egui::Ui, selected: bool, key: &str, text: &str, theme: Them
     response
 }
 
-/// Adds a band between an outer and an inner rect to a mesh: `outer` color
-/// at the outer edge, `inner` at the inner one.
+/// Adds a band between the `outer` and `inner` rects to `mesh`, with
+/// `outer_color` at the outer edge and `inner_color` at the inner one.
 fn ring(mesh: &mut Mesh, outer: Rect, inner: Rect, outer_color: Color32, inner_color: Color32) {
     let base = mesh.vertices.len() as u32;
     for (pos, color) in [
@@ -603,7 +603,8 @@ fn ring(mesh: &mut Mesh, outer: Rect, inner: Rect, outer_color: Color32, inner_c
     }
 }
 
-/// Darkens the edges of a scene. `strength` is the alpha at the very edge.
+/// Darkens the edges of a scene with black that fades toward the middle.
+/// `strength` is the alpha at the very edge, from 0 to 1.
 pub fn vignette(painter: &egui::Painter, rect: Rect, strength: f32) {
     let mut mesh = Mesh::default();
     let size = rect.size();
@@ -616,7 +617,8 @@ pub fn vignette(painter: &egui::Painter, rect: Rect, strength: f32) {
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// The fine film-grain texture, made once and kept in the context.
+/// The film-grain texture: 128 by 128 pixels of white and black specks of
+/// varying strength. It is made once and kept in the context.
 fn grain_texture(ctx: &egui::Context) -> egui::TextureId {
     let id = egui::Id::new("theme_grain");
     if let Some(handle) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
@@ -650,8 +652,10 @@ fn grain_texture(ctx: &egui::Context) -> egui::TextureId {
     tex
 }
 
-/// Film grain over a scene. `time` moves the pattern, so the grain lives
-/// while the scene plays and holds still while it is paused.
+/// Paints film grain over `rect`. `alpha` is its strength from 0 to 1, and 0
+/// paints nothing. `time` is the scene clock. The pattern jumps 24 times per
+/// second of it, so the grain lives while the scene plays and holds still while
+/// it is paused.
 pub fn grain(painter: &egui::Painter, rect: Rect, time: f32, alpha: f32) {
     if alpha <= 0.0 {
         return;
@@ -666,10 +670,13 @@ pub fn grain(painter: &egui::Painter, rect: Rect, time: f32, alpha: f32) {
     painter.image(tex, rect, uv, Color32::from_rgba_premultiplied(a, a, a, a));
 }
 
-/// One line of a HUD block.
+/// One line of a HUD block. `hud_block` lays out a list of them.
 pub struct HudLine {
+    /// The words or digits of the line.
     pub text: String,
+    /// The font size in points.
     pub size: f32,
+    /// The text color.
     pub color: Color32,
     /// Bold letter-spaced capitals, for labels.
     pub caps: bool,
@@ -678,7 +685,7 @@ pub struct HudLine {
 }
 
 impl HudLine {
-    /// A small capital label in HUD yellow.
+    /// A small capital label in dim HUD yellow.
     pub fn label(text: &str) -> Self {
         Self {
             text: text.to_owned(),
@@ -688,7 +695,7 @@ impl HudLine {
             glow: false,
         }
     }
-    /// A big glowing number.
+    /// A line of glowing digits in the HUD digit face, at `size` and `color`.
     pub fn value(text: String, size: f32, color: Color32) -> Self {
         Self {
             text,
@@ -698,7 +705,7 @@ impl HudLine {
             glow: true,
         }
     }
-    /// Plain text.
+    /// A line of plain text in the interface font, at `size` and `color`.
     pub fn text(text: String, size: f32, color: Color32) -> Self {
         Self {
             text,
@@ -710,8 +717,10 @@ impl HudLine {
     }
 }
 
-/// A HUD box holding lines of text, anchored at `anchor` by `align`, with
-/// the text aligned to the same side. Returns the box's rect.
+/// Paints a HUD box that holds `lines` one under the other, anchored at
+/// `anchor` by `align`. The text sits on the same side as the anchor: left for
+/// a left anchor, centered for a center anchor and right for a right anchor.
+/// Returns the rect of the box.
 pub fn hud_block(painter: &egui::Painter, anchor: Pos2, align: Align2, lines: &[HudLine]) -> Rect {
     const PAD: Vec2 = Vec2::new(12.0, 8.0);
     let galleys: Vec<_> = lines
@@ -758,20 +767,25 @@ pub fn hud_block(painter: &egui::Painter, anchor: Pos2, align: Align2, lines: &[
     rect
 }
 
-/// A Half-Life 2 counter: a smoked-glass box with its label low on the
-/// left and big glowing digits beside it, like HEALTH and SUIT. `unit`
-/// follows the digits small, `extra` sits right of them like the reserve
-/// count of the ammo box. `damaged` turns it red, as the HUD does when hit.
+/// A Half-Life 2 counter: a smoked-glass box with its label low on the left and
+/// big glowing digits beside it, like HEALTH and SUIT.
 pub struct Counter<'a> {
+    /// The caption on the left, painted as small capitals.
     pub label: &'a str,
+    /// The number, in big glowing digits.
     pub digits: String,
+    /// The unit after the digits, painted small. It may be empty.
     pub unit: &'a str,
+    /// A second number right of the unit, like the reserve count of the ammo
+    /// box.
     pub extra: Option<String>,
+    /// Turns the counter red, as the HUD does when hit.
     pub damaged: bool,
 }
 
-/// Paints a counter anchored at `anchor` by `align` and returns its rect.
-/// `size` is the digit height.
+/// Paints `counter` anchored at `anchor` by `align` and returns its rect.
+/// `size` is the font size of the digits in points. The label, the unit and
+/// the extra number scale with it.
 pub fn counter(
     painter: &egui::Painter,
     anchor: Pos2,
