@@ -377,8 +377,8 @@ impl Experiment {
                 .total_cmp(&standard[a].fitness)
                 .then(a.cmp(&b))
         });
-        for (k, &j) in rest.iter().enumerate() {
-            if k < MAX_CONFIRMS_PER_ROUND {
+        for (rank, &j) in rest.iter().enumerate() {
+            if rank < MAX_CONFIRMS_PER_ROUND {
                 need.push(j);
             } else {
                 // Past the limit of the round. A later round asks for it:
