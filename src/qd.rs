@@ -372,8 +372,8 @@ pub const RARITY_WEIGHT: f32 = 1.0;
 /// Times a reserve entry must have been a parent before a new body plan may
 /// replace it in a full reserve.
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
-/// Share of the structural emitter's children whose parent comes from the
-/// island's morphology reserve.
+/// Share of the structural emitter's children whose parent is drawn from the
+/// island's morphology reserve. An empty reserve gives a usual parent instead.
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
 /// The share of each emitter before any attempts, in `Emitter::ALL` order.
 /// `emitter_weights` scales it afterwards. Random bodies only seed an empty
@@ -526,7 +526,8 @@ impl Elite {
 /// up to `MORPHOLOGY_LIMIT` entries. The reserve holds the best creature of a
 /// body plan that no behavior elite matches in distance, so a new plan keeps
 /// breeding until it finds a cell. The islands, their nurseries and the global
-/// archive are all archives, and each has its own layout of cells (`Classes`).
+/// archive are all archives. The global archive uses `GLOBAL_CLASSES` and the
+/// others use `ISLAND_CLASSES`, once they are refined.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QdArchive {
@@ -2083,9 +2084,9 @@ pub fn emitter_weights(stats: &[EmitterStats; EMITTER_COUNT]) -> [f64; EMITTER_C
     let sum = weights.iter().sum::<f64>().max(f64::MIN_POSITIVE);
     weights.map(|w| w / sum)
 }
-/// Draws an emitter with the probabilities in `weights`, using one draw of
-/// `rng`. A draw past the last cumulative weight, which rounding can cause,
-/// gives `Emitter::Restart`.
+/// Draws an emitter with the probabilities in `weights`. It takes one draw
+/// from `rng`. A draw past the last cumulative weight, which rounding can
+/// cause, gives `Emitter::Restart`.
 pub fn choose_emitter(rng: &mut Rng, weights: &[f64; EMITTER_COUNT]) -> Emitter {
     let draw = rng.unit() as f64;
     let mut total = 0.0;
