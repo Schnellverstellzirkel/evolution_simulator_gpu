@@ -1,10 +1,9 @@
-//! The look of the game: a warm painted poster, after Team Fortress 2
-//! promotional art. Cream cards and tan paper with thick dark brown
-//! outlines, mustard for what is armed, brick red for what matters, BLU
-//! blue for what is secondary, chunky condensed titles and dark text on
-//! light panels. The replay scene keeps its own colors and smoked-glass
-//! HUD, framed like a picture on the poster. Everything here is a few
-//! shapes or one textured quad, so it costs next to nothing per frame.
+//! This module holds the look of the game: its colors, its egui style and the
+//! small painters that the interface shares. The look is a warm painted poster
+//! after Team Fortress 2 promotional art, and its palette is in `poster`. The
+//! replay scene keeps its own colors in `scene` and a smoked-glass HUD, framed
+//! like a picture on the poster. `ui.rs`, the modules under `ui/` and
+//! `world_fx.rs` draw with it.
 use crate::assets::{self, Art};
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2,
@@ -12,53 +11,71 @@ use eframe::egui::{
     text::{LayoutJob, TextFormat},
 };
 
-/// Colors of the scene: the replay, the race lanes and the thumbnails.
+/// Colors of the scene: the replay, the race lanes, the creature thumbnails
+/// and the exported GIF.
 pub mod scene {
     use eframe::egui::Color32;
-    /// Haze at the horizon, and the sky color where no texture reaches.
+    /// The sky at the top edge of an exported GIF.
     pub const SKY_TOP: Color32 = Color32::from_rgb(70, 80, 84);
+    /// Haze at the horizon. It fills the replay behind the sky texture, tints
+    /// the fog between the skyline layers and ends the sky of an exported GIF.
     pub const SKY_HORIZON: Color32 = Color32::from_rgb(132, 140, 140);
-    /// Street ground, from the surface down.
+    /// The ground fill of an exported GIF.
     pub const GROUND_TOP: Color32 = Color32::from_rgb(88, 86, 80);
+    /// Street ground at depth. Nothing uses it now.
     pub const GROUND_DEEP: Color32 = Color32::from_rgb(34, 34, 32);
     /// The worn lip along the ground surface.
     pub const GROUND_EDGE: Color32 = Color32::from_rgb(158, 152, 132);
     /// Meter labels and ticks on the ground.
     pub const GROUND_INK: Color32 = Color32::from_rgb(196, 190, 170);
-    /// Faint meter lines across the sky.
+    /// Faint vertical meter lines across the sky.
     pub const GRID: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
-    /// Sludge of the mud layer, its lower edge and its wet shine.
+    /// The sludge of the mud layer.
     pub const MUD: Color32 = Color32::from_rgb(60, 44, 26);
+    /// The line along the lower edge of the mud layer.
     pub const MUD_EDGE: Color32 = Color32::from_rgb(34, 25, 14);
+    /// The wet shine along the top of the mud layer.
     pub const MUD_SHEEN: Color32 = Color32::from_rgba_premultiplied(66, 52, 34, 120);
-    /// Creature parts: steel bones, flesh muscles, dark outlines.
+    /// The dark outline of bones, muscles, organs and nodes, and the pupil of
+    /// the eye.
     pub const OUTLINE: Color32 = Color32::from_rgb(10, 10, 10);
+    /// A bone: steel.
     pub const BONE: Color32 = Color32::from_rgb(170, 174, 170);
+    /// The bright streak along the upper side of a bone.
     pub const BONE_SHINE: Color32 = Color32::from_rgb(226, 230, 224);
+    /// An organ, the disc on a bone that carries organ mass.
     pub const ORGAN: Color32 = Color32::from_rgb(168, 72, 64);
+    /// A muscle at rest: pale flesh.
     pub const MUSCLE_REST: Color32 = Color32::from_rgb(196, 120, 100);
+    /// A muscle at full contraction: deep red.
     pub const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(160, 22, 16);
+    /// A muscle with no energy left: grey.
     pub const MUSCLE_TIRED: Color32 = Color32::from_rgb(118, 116, 108);
-    /// Node shells: slick steel blue for low friction, brass for high.
+    /// A node shell at the lowest friction: slick steel blue.
     pub const NODE_SLICK: Color32 = Color32::from_rgb(150, 178, 196);
+    /// A node shell at the highest friction: brass.
     pub const NODE_GRIPPY: Color32 = Color32::from_rgb(204, 170, 104);
-    /// The head's eye glows like a HUD light.
+    /// The head's eye. It glows like a HUD light.
     pub const EYE: Color32 = Color32::from_rgb(255, 220, 120);
-    /// Ring around a node on the ground.
+    /// The ring around a node on the ground.
     pub const TOUCHDOWN: Color32 = Color32::from_rgb(255, 204, 64);
-    /// A fall, a broken joint: the HUD's damage red.
+    /// The damage red: a fall, a broken joint, a damaged counter.
     pub const FALLEN: Color32 = Color32::from_rgb(232, 52, 36);
-    /// Force arrows: muscle pulls and ground pushes.
+    /// The arrows for muscle pulls.
     pub const FORCE_MUSCLE: Color32 = Color32::from_rgb(255, 150, 30);
+    /// The arrows for ground pushes.
     pub const FORCE_GROUND: Color32 = Color32::from_rgb(90, 180, 240);
-    /// The HUD: yellow digits and labels on dark glass over the scene.
+    /// HUD digits and text: yellow on dark glass over the scene.
     pub const HUD: Color32 = Color32::from_rgb(255, 220, 0);
+    /// Small HUD labels: a dimmer yellow.
     pub const HUD_DIM: Color32 = Color32::from_rgb(230, 196, 40);
+    /// Plain HUD text: a warm off-white.
     pub const HUD_INK: Color32 = Color32::from_rgb(228, 222, 206);
+    /// The dark glass behind a HUD box.
     pub const HUD_BACK: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
-    /// The damaged HUD: a red wash behind red digits.
+    /// The red wash behind a damaged counter.
     pub const HUD_DAMAGED: Color32 = Color32::from_rgba_premultiplied(80, 0, 0, 150);
-    /// The centre of mass and its trail.
+    /// The center of mass and its trail.
     pub const TRAIL: Color32 = Color32::from_rgb(255, 210, 60);
 }
 
