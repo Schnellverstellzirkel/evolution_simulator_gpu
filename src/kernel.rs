@@ -1,10 +1,12 @@
-//! Packing and kernel source of the creature kernel (`shaders/creature.cu`).
+//! Packs creatures into the buffers of the CUDA kernel (`shaders/creature.cu`)
+//! and writes the kernel's source text and launch parameters.
 //!
-//! One GPU thread simulates one creature. Each creature has a flat record of
-//! node and bone words in `WavePack::lanes`, a run of muscle records in
-//! `WavePack::muscles`, and two head words in `WavePack::heads`. Node `j + 1`
-//! is the child of bone `j` and node 0 is the head, as `physics2::Model`
-//! numbers them.
+//! One GPU thread simulates one creature, which has a record of node and bone
+//! words in `WavePack::lanes`, a run of muscle records in `WavePack::muscles`
+//! and two head words in `WavePack::heads`. Node `j + 1` is the child end of
+//! bone `j` and node 0 is the head, as `physics2::Model` numbers them.
+//! `engine` calls `pack_reusing`, and `cuda_engine` compiles `cuda_source` and
+//! launches the kernel with `params`.
 use crate::{
     config::Config,
     creature_kernel::LaneBatch,
@@ -17,40 +19,55 @@ use crate::{
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 
-/// Largest body the kernel runs, and the node slots of a recorded frame.
+/// Largest body the kernel runs (`MAXN` in the kernel), and the node slots of
+/// a recorded frame.
 pub const MAX_NODES: usize = 32;
-/// Most muscles a body may have.
+/// Most muscles a body may have (`MAXM` in the kernel).
 pub const MAX_MUSCLES: usize = crate::evolution::MAX_MUSCLES;
-/// Words per node record: mass, radius, friction, start x, start y, foot.
+/// Words per node record: mass, radius, friction, start x, start y, foot. The
+/// kernel has its own `NODE_WORDS` of the same value.
 pub const NODE_WORDS: usize = 6;
-/// Words per bone record: pivot node, length, parent bone, joint range low
-/// and high, and one spare.
+/// Words per bone record: pivot node, length, parent bone (`u32::MAX` for the
+/// neck), joint range low and high, and one spare. The kernel has its own
+/// `BONE_WORDS` of the same value.
 pub const BONE_WORDS: usize = 6;
-/// Floats per muscle record (`MusclePull` and `MuscleRhythm` in the kernel).
+/// Floats per muscle record, five lines of four. Eight floats are `MusclePull`
+/// and nine are `MuscleRhythm` in the kernel, and three are spare. The kernel
+/// calls this number `MUSCLE_WORDS`.
 pub const MUSCLE_FIELDS: usize = 20;
 /// Lane classes the engine compiles a kernel for. A creature is one thread,
 /// so there is one class, named by the node slots of its frames.
 pub const CLASSES: [usize; 1] = [MAX_NODES];
-/// Substeps per step: 16 at the standard 60 steps per second (960 per
-/// second).
+/// Substeps per step. At the standard 60 steps per second that is 960
+/// substeps per second.
 pub const SUBSTEPS: u32 = 16;
-/// Threads per block, and blocks per multiprocessor the kernel is built for.
+/// Threads per block.
 pub const BLOCK: u32 = 128;
+/// Blocks of `BLOCK` threads per multiprocessor that the kernel's
+/// `__launch_bounds__` asks the compiler to fit. That limits the registers of a
+/// thread.
 pub const MIN_BLOCKS: u32 = 3;
-/// Creatures per kernel launch (a wave).
+/// Most creatures in one kernel launch (a wave).
 pub const WAVE: usize = 262_144;
 
 /// The creature data of one batch, ready for upload, in host memory the
 /// engine copies from directly and reuses for later units.
 #[derive(Default)]
 pub struct WavePack {
-    /// Node and bone records, one run per creature.
+    /// Node and bone records, one run per creature. A run is its node records
+    /// of `NODE_WORDS` words, then its bone records of `BONE_WORDS` words.
     pub lanes: HostVec<u32>,
-    /// Muscle records, one run per creature.
+    /// Muscle records, one run per creature, `MUSCLE_FIELDS` floats each.
     pub muscles: HostVec<f32>,
-    /// Unused; kept so the engine's buffers keep their places.
+    /// One word that the kernel does not read. It keeps the engine's buffers
+    /// in their places.
     pub ends: HostVec<u32>,
-    /// Two words of four per creature (see `fill_creature`).
+    /// Two head words per creature, four `u32` each (see `pack_reusing`). The
+    /// first is the node count, the muscle count, the quake hash and the word
+    /// offset of its run in `lanes`. The second is the float offset of its run
+    /// in `muscles`, its total mass and the inverse of it as bits, and its
+    /// first muscle's period as a half float in the low 16 bits with its
+    /// creature flags (`rungs::AUDIT` and the others) in the high 16 bits.
     pub heads: HostVec<[u32; 4]>,
 }
 
@@ -59,7 +76,9 @@ pub fn class_of(nodes: usize, muscles: usize) -> Option<usize> {
     (nodes <= MAX_NODES && muscles <= MAX_MUSCLES).then_some(MAX_NODES)
 }
 
-/// World switches: an effect that is off leaves no code in the kernel.
+/// The effect switches of a world: bit `b` is on when the effect
+/// `FLAG_NAMES[b]` is in it. An effect that is off leaves no code in the
+/// kernel, and the effects of the ground are off in a world without ground.
 pub fn world_flags(cfg: &Config) -> u32 {
     let ground = cfg.ground;
     let mut flags = 0u32;
@@ -86,20 +105,22 @@ pub fn world_flags(cfg: &Config) -> u32 {
     flags
 }
 
-/// Effect names indexed by their bit position in `world_flags`.
+/// Effect names indexed by their bit position in `world_flags`. `cuda_source`
+/// defines each name as 1 or 0 in the kernel. `ICE` is the `patches` effect.
 const FLAG_NAMES: [&str; 12] = [
     "GROUND", "TERRAIN", "SLOPE", "GAPS", "HURDLES", "QUAKE", "MUD", "WATER", "ICE", "WIND", "AIR",
     "BRAMBLES",
 ];
 
 /// The effects compiled into a world's kernel, in words for the loading
-/// screen ("Mud, Wind"), or "calm" when it has none beyond flat ground.
+/// screen ("Mud, Wind"), or "calm" when there is none to name.
 pub fn world_label(flags: u32) -> String {
     let on: Vec<String> = FLAG_NAMES
         .iter()
         .enumerate()
-        // Ground is in every world that has a floor, and quakes set the
-        // terrain switch too, so it names a rough floor only without them.
+        // Ground is in every world that has a floor, so it is not named.
+        // Quakes set the terrain switch too, so terrain is named only
+        // without a quake.
         .filter(|&(bit, _)| {
             flags & (1 << bit) != 0 && (bit > 1 || (bit == 1 && flags & (1 << 5) == 0))
         })
@@ -119,45 +140,75 @@ pub fn world_label(flags: u32) -> String {
     }
 }
 
-/// Kernel parameters; the layout of `Params` in the kernel.
+/// The launch parameters of the kernel, passed by value. The layout is the
+/// same as `Params` in the kernel.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Params {
+    /// Creatures in this wave.
     pub count: u32,
+    /// Index in the batch of the first creature of this wave.
     pub base: u32,
+    /// Timed steps of the trial, after the settling steps.
     pub steps: u32,
+    /// The step at whose end the early screen applies, or `u32::MAX` when the
+    /// trial has no screen.
     pub screen_step: u32,
+    /// Slots in one recorded frame (`creature_kernel::frame_stride`). Only a
+    /// recording kernel reads it.
     pub stride: u32,
+    /// Gravity (m/s^2).
     pub gravity: f32,
+    /// Velocity kept per step. The kernel reads `air_sub` instead.
     pub air: f32,
+    /// Ground friction. It multiplies the friction coefficient of each node.
     pub friction: f32,
+    /// Bump height (m) of the ground's roughness level.
     pub terrain: f32,
+    /// Multiplier on each muscle's energy store. The kernel reads
+    /// `inv_muscle_energy` instead.
     pub muscle_energy: f32,
+    /// Multiplier on the recovery of the muscle energy stores.
     pub muscle_recovery: f32,
+    /// Ground slope, rise over run.
     pub slope: f32,
+    /// Horizontal wind acceleration (m/s^2).
     pub wind: f32,
+    /// Mud sink depth (m).
     pub mud: f32,
+    /// Pit opening width (m).
     pub gaps: f32,
+    /// Hurdle height (m).
     pub hurdles: f32,
+    /// Earthquake base bump height (m).
     pub quake: f32,
+    /// The distance (m) under which the early screen stops a creature that is
+    /// neither young nor reshaped. It is negative infinity when the trial has
+    /// no screen.
     pub screen_bar: f32,
-    /// The screen bars of a young creature and of a reshaped one
-    /// (`rungs::YOUNG`, `rungs::RESHAPED`).
+    /// The screen bar of a young creature (`rungs::YOUNG`).
     pub screen_bar_young: f32,
+    /// The screen bar of a reshaped one (`rungs::RESHAPED`).
     pub screen_bar_reshaped: f32,
+    /// Water line height (m).
     pub water: f32,
+    /// Ice patch strength, the share of friction that a patch takes away.
     pub patches: f32,
     /// Velocity kept per substep.
     pub air_sub: f32,
+    /// One over `muscle_energy`.
     pub inv_muscle_energy: f32,
+    /// Drag (1/s) on the nodes that are not feet while they touch the ground.
     pub brambles: f32,
-    /// The early rungs at 1 s and 2.5 s (`rungs::Rung`); a rule that never
-    /// stops for a trial without them.
+    /// The early rung at 1 s (`rungs::Rung`). A trial without rungs carries a
+    /// rule that never stops it.
     pub r1: Rung,
+    /// The early rung at 2.5 s.
     pub r2: Rung,
 }
 
-/// Parameters of a wave of `count` creatures from `base` of a batch.
+/// The parameters of the wave of `count` creatures that starts at creature
+/// `base` of a batch. `stride` is the number of slots in one recorded frame.
 pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params {
     let fidelity = cfg.fidelity();
     let air = fidelity.air_per_step(cfg.air_retention);
