@@ -621,11 +621,17 @@ impl Experiment {
         }
         failed
     }
-    /// Records this generation's archive statistics as its `history` row.
+    /// Adds the `history` row of the generation that ends. The row sums up the
+    /// global archive: the distances of its elites, how many cells it fills,
+    /// its body plans and clades, and three representative creatures. It also
+    /// holds the emitter statistics and `failed`, the generation's count of
+    /// failed trials. It does nothing when `history` has the row already.
     pub(super) fn push_archive_stats(&mut self, failed: usize) {
         if self.history.len() > self.generation as usize {
             return;
         }
+        // The elites that fill a cell, without any entry of the morphology
+        // reserve.
         let elites: Vec<_> = self
             .archive
             .entries
@@ -634,8 +640,8 @@ impl Experiment {
             .collect();
         // The median, the worst, the mean and the percentiles read the best
         // elite of each way of moving, so they mean what they meant before the
-        // archive had body classes. The histogram and the body types count
-        // every elite.
+        // archive had body classes. The histogram and the body types, which
+        // are the node and muscle counts, count every elite in a cell.
         let mut ways: Vec<_> = self
             .archive
             .best_per_way_of_moving()
@@ -645,6 +651,8 @@ impl Experiment {
         ways.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
         let count = ways.len();
         let archive_best = self.archive.best_fitness();
+        // The fitness at percentile `p`, from the worst (0) to the best (100)
+        // of `ways`, or 0 when there are none.
         let quantile = |p: f32| {
             if count == 0 {
                 0.0
@@ -667,9 +675,13 @@ impl Experiment {
                 .or_default() += 1;
         }
         let mut percentiles: Vec<_> = PERCENTILES.iter().map(|&p| quantile(p)).collect();
+        // The last percentile is the best fitness of the whole archive.
         if let Some(best_percentile) = percentiles.last_mut() {
             *best_percentile = archive_best.max(0.0);
         }
+        // The representatives are the slowest, the median and the fastest
+        // entry of the archive, in that order. While the archive is empty they
+        // are the ring's first creature three times.
         let mut all_elites: Vec<_> = self.archive.entries.iter().collect();
         all_elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
         let representatives = if all_elites.is_empty() {
@@ -707,6 +719,10 @@ impl Experiment {
                 .map(|e| e.topology.plan_key())
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
+            // `plan_born` holds the generation each body plan first appeared
+            // in. It drops the plans that left the archive, so a plan that
+            // returns starts young. `plan_age` is the median age of the plans
+            // in the archive.
             plan_age: {
                 let present: std::collections::HashSet<u64> =
                     elites.iter().map(|e| e.topology.plan_key()).collect();
