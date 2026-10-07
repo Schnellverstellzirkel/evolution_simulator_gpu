@@ -48,8 +48,8 @@ struct Job {
 }
 
 struct Registry {
-    /// In the order of their first report. Finished jobs stay, so the screen
-    /// can count them.
+    /// Every job reported so far, in the order of its first report. Finished
+    /// jobs stay, so the screen can count them.
     jobs: Vec<Job>,
     /// When the first job was queued or started.
     since: Option<Instant>,

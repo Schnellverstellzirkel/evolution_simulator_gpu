@@ -1,8 +1,8 @@
 //! The entry point of the program: it sets up the Rayon pool and reads the
 //! command line. With no subcommand it opens the game window (`ui::launch`).
-//! `headless` evolves without a window and saves a checkpoint with the history
-//! as CSV. `eval-bench` scores the creatures of a saved game again and again
-//! on the GPU, for kernel diagnostics.
+//! `headless` evolves without a window and saves a checkpoint and a history
+//! CSV. `eval-bench` scores the creatures of a saved game again and again on
+//! the GPU, for kernel diagnostics.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -22,8 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-// A `///` comment on a field or a variant below is its `--help` text. The
-// fields that have no help text have `//` comments instead.
+// The command line: the global `--gpu` and an optional subcommand. A `///`
+// comment on a field or a variant below is its `--help` text, so the fields
+// that have no help text have `//` comments instead.
 #[derive(Parser)]
 #[command(
     version,
@@ -37,6 +38,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Action>,
 }
+// The subcommands. With none, the game window opens.
 #[derive(Subcommand)]
 enum Action {
     /// Evolve without opening a window. Ctrl+C checkpoints the current generation.
@@ -290,8 +292,9 @@ fn main() -> Result<()> {
             let indices: Vec<usize> = (0..count).collect();
             // `--screened`: a save loads with no screen bar, so a first pass
             // runs every trial in full and records each creature's distance at
-            // the screen. The bar is the distance that the best tenth reached
-            // there, as in the game, and the repeats run with it.
+            // the screen. The bar is the distance that the best share of them
+            // (`physics::screen_keep`) reached there, as in the game, and the
+            // repeats run with it.
             if screened && let Some(screen) = cfg.screen {
                 let gpu = gpu
                     .as_mut()
