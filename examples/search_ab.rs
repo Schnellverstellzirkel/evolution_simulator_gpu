@@ -70,7 +70,7 @@ struct Options {
     /// generation N of this run, to the `--effect` levels or, with none, to
     /// the next autochange step.
     change_at: Option<u32>,
-    /// `--load PATH`: continue a save instead of starting a new game. The
+    /// `--load SAVE`: continue a save instead of starting a new game. The
     /// seed list then only names the run, and the population option sets
     /// the generation size.
     load: Option<String>,
@@ -220,6 +220,7 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(",")
     );
+    // The column names of the line `run_seed` prints for each generation.
     println!("{scope} seed generation best_m qd_score cells mean_nodes mean_muscles");
     let started = Instant::now();
     let (mut distances, mut scores) = (Vec::new(), Vec::new());
@@ -255,8 +256,9 @@ fn cpu_seconds() -> f64 {
 }
 
 /// Checks that a creature's result does not depend on the batch it ran in.
-/// It scores the ring's first 20,000 creatures whole, then again in shuffled
-/// chunks of 2,999, once as standard trials and once as confirmation trials.
+/// It scores the ring's first 20,000 creatures in one batch, then again in
+/// shuffled chunks of 2,999, once as standard trials and once as confirmation
+/// trials.
 /// For each kind it prints how many creatures differ in the bits of their
 /// fitness and, among the rest, in the bits of their mean height or ground
 /// contact.
@@ -654,14 +656,17 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     Ok((best, qd))
 }
 
-/// The nurseries after a generation: the bodies and distinct body plans of
-/// every nursery of reshaped bodies, the distinct plans of all archives
-/// (islands, nurseries of new bodies, nurseries of reshaped bodies), and,
-/// when a graduation has just happened, what each island took of the two
-/// nurseries.
+/// Prints the nursery lines after a generation: the elites held by the
+/// nurseries of reshaped bodies, the distinct body plans of the islands and of
+/// all archives, and the island cells that nursery graduates hold. Then it
+/// prints the CMA emitters per archive and each island's QD score. After a
+/// generation boundary that graduated the nurseries it also prints how many
+/// bodies each island kept of the two nurseries. It prints nothing until the
+/// island archives exist.
 fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experiment) {
     use evolution_simulator::{qd, storage};
     use std::collections::HashSet;
+    // Distinct body plans among the behavior elites of `archives`.
     let plans = |archives: &[&qd::QdArchive]| -> usize {
         archives
             .iter()
@@ -681,7 +686,8 @@ fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experim
         .map(|i| &experiment.islands[storage::reshaped_of(i)])
         .collect();
     let bodies: usize = reshaped.iter().map(|a| a.behavior_count()).sum();
-    // The cells of the islands that nursery graduates hold.
+    // The island cells whose elite satisfies `keep`. A graduate grew up in a
+    // nursery, or descends from an elite that did.
     let cells = |keep: fn(&qd::Elite) -> bool| -> usize {
         mature
             .iter()
@@ -733,9 +739,12 @@ fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experim
     }
 }
 
-/// How much of their archive distance the 50 best global elites keep at four
-/// times the rate and solver passes (full trial, no screen) from a slightly
-/// perturbed pose that no run used.
+/// Prints how much of its archive distance each of the `TOP_BODIES` fastest
+/// global elites keeps when it runs again from a nudged start pose
+/// (`perturb`) at four times the rate and solver passes, with no screen. The
+/// line gives the median share kept and how many elites keep less than half.
+/// The other settings of the trial are the experiment's, early rungs
+/// included.
 fn print_robustness(
     scope: &str,
     seed: u64,
@@ -756,7 +765,8 @@ fn print_robustness(
     let mut unit = Population::default();
     for elite in &elites {
         let mut creature = elite.creature.unpack();
-        // A second pose from the same rule: the id seeds the perturbation.
+        // The id seeds the nudge. The XOR gives another pose than the bare id
+        // would. The id is restored after.
         creature.id ^= 0x9e37_79b9;
         perturb(&mut creature);
         creature.id ^= 0x9e37_79b9;
@@ -789,10 +799,12 @@ fn print_robustness(
     Ok(())
 }
 
-/// QD score of the global archive's behavior elites re-binned on one fixed
-/// grid (the archive shape before any experiment: contact 6, cadence 8,
-/// height 6, feet 5), so runs whose archives have different shapes compare on
-/// the same ground. Also the reserve size and the distinct body plans held.
+/// Prints the QD score of the global archive's behavior elites re-binned on
+/// the movement grid alone (contact 6, cadence 8, height 6, feet 5, the cells
+/// of `qd` without the body classes), so runs whose archives have other
+/// layouts compare on the same ground. It also prints the morphology reserve
+/// the islands hold and the distinct body plans in the global archive, its
+/// reserve included.
 fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     let mut cells: HashMap<[u8; 4], f32> = HashMap::new();
     let mut plans = std::collections::HashSet::new();
@@ -802,9 +814,13 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
             continue;
         }
         let d = &elite.descriptor;
+        // A copy of `qd`'s movement binning, which `qd` keeps private. It
+        // stays fixed when the archive's grid changes.
         let bin = |v: f32, high: f32, n: f32| {
             ((v.clamp(0.0, high) / high * n).floor().min(n - 1.0)) as u8
         };
+        // Mean height on a log scale from `low` to the tallest body the bone
+        // limit allows, as `qd` scales it.
         let low = 0.15f32;
         let top = (0.6 * evolution_simulator::evolution::max_bone_length()).max(2.0 * low);
         let height = ((d.mean_height.max(low) / low).ln() / (top / low).ln()).clamp(0.0, 1.0);
@@ -831,8 +847,10 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     );
 }
 
-/// Each island's best distance and QD score, and when the global best
-/// first came from the hub (was born in a hub slot).
+/// Prints each island's best distance and QD score. Then it prints when the
+/// global best elite came from the hub, meaning it was born in a hub slot: the
+/// first such generation and how many there were out of `generations`.
+/// `hub_best` lists them.
 fn print_islands(
     scope: &str,
     seed: u64,
@@ -868,17 +886,18 @@ fn print_islands(
 /// Top elites per island for the diversity report.
 const ISLAND_TOP: usize = 20;
 
-/// How much the islands' best elites have in common. For each island's
-/// fastest `ISLAND_TOP` behavior elites: how many distinct body plans they
-/// hold, the share whose body plan is also among another island's top
+/// Prints how much the islands' best elites have in common. For each island's
+/// fastest `ISLAND_TOP` behavior elites it gives how many distinct body plans
+/// they hold, the share whose body plan is also among another island's top
 /// elites, the share that is the same creature (a migrant copy), and the
 /// share whose oldest recorded ancestor is also an oldest ancestor of
-/// another island's top elites (common descent). The hub, when there is
-/// one, is compared with the others but left out of the means, because it
-/// holds copies of the other islands' elites by design.
+/// another island's top elites (common descent). Another island is any
+/// island but the hub, the wild islands included. The hub gets a row but
+/// stays out of the means, because it holds copies of the other islands'
+/// elites by design. The means cover the islands that hold elites.
 fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     use std::collections::HashSet;
-    let hub: Option<usize> = Some(evolution_simulator::storage::hub_island());
+    let hub = evolution_simulator::storage::hub_island();
     let tops: Vec<Vec<&evolution_simulator::qd::Elite>> = experiment
         .islands
         .iter()
@@ -894,7 +913,9 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
             elites
         })
         .collect();
-    // By the ids that key the records: a pruned record's creature has id 0.
+    // The oldest recorded ancestor. The lineage is walked by the ids that key
+    // its records, not by the records' `creature.id`, because a pruned
+    // record's creature has id 0.
     let root = |id: u64| {
         experiment
             .ancestry_ids(id, usize::MAX)
@@ -921,10 +942,8 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
         if top.is_empty() {
             continue;
         }
-        // Compare with the other isolated islands (all islands without a hub).
-        let others: Vec<usize> = (0..tops.len())
-            .filter(|&o| o != k && Some(o) != hub)
-            .collect();
+        // Compare with every other island but the hub.
+        let others: Vec<usize> = (0..tops.len()).filter(|&o| o != k && o != hub).collect();
         let share = |hit: &dyn Fn(&evolution_simulator::qd::Elite) -> bool| {
             top.iter().filter(|e| hit(e)).count() as f64 / top.len() as f64
         };
@@ -936,13 +955,13 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
         });
         rows.push(format!(
             "{}{k}: plans {} shared {:.2} copies {:.2} kin {:.2}",
-            if Some(k) == hub { "hub " } else { "" },
+            if k == hub { "hub " } else { "" },
             plans[k].len(),
             shared,
             copies,
             kin
         ));
-        if Some(k) != hub {
+        if k != hub {
             plan_sum += plans[k].len() as f64;
             shared_sum += shared;
             copy_sum += copies;
@@ -961,15 +980,20 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     );
 }
 
+/// The size of one elite's body, measured as `size_report` measures it.
 struct BodySize {
     nodes: usize,
     muscles: usize,
+    /// Sum of the rest lengths of all bones, in m.
     length: f32,
+    /// Rest length of the longest bone, in m.
     longest_bone: f32,
+    /// Mass of the nodes with the bones' and organs' masses included, in kg.
     mass: f32,
 }
 
-/// The `count` fastest elites of the global archive.
+/// The sizes of the `count` fastest elites of the global archive, fastest
+/// first.
 fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
     let mut elites: Vec<_> = experiment
         .archive
@@ -1004,6 +1028,9 @@ fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
         .collect()
 }
 
+/// Prints the node counts of `bodies` as `nodes`x`bodies` pairs, their median
+/// length and mass, their longest bone, and their mean and largest muscle
+/// count.
 fn print_body_mix(scope: &str, seed: u64, bodies: &[BodySize]) {
     if bodies.is_empty() {
         println!("{scope} seed {seed} top-{TOP_BODIES}: no scored creatures");
@@ -1039,6 +1066,9 @@ fn print_body_mix(scope: &str, seed: u64, bodies: &[BodySize]) {
     );
 }
 
+/// Prints the mean and median of the seeds' best distances and of their QD
+/// scores. Values that are not finite, such as the best distance of a seed
+/// whose archive stayed empty, are dropped first.
 fn paired_summary(distances: &mut Vec<f32>, scores: &mut Vec<f32>) {
     let seeds = distances.len();
     distances.retain(|distance| distance.is_finite());
@@ -1060,13 +1090,16 @@ fn mean(values: &[f32]) -> f32 {
     values.iter().sum::<f32>() / values.len() as f32
 }
 
-/// Upper middle entry of the sorted values, like `size_report`.
+/// Sorts `values` and returns the upper middle entry, like `size_report`.
+/// `values` must not be empty.
 fn median(values: &mut [f32]) -> f32 {
     values.sort_by(f32::total_cmp);
     values[values.len() / 2]
 }
 
-/// Small deterministic change to a creature's starting pose and grip.
+/// Nudges a creature's start pose and grip by small amounts drawn from a
+/// stream keyed by its id. Each node moves up to 0.02 m in x either way and 0
+/// to 0.02 m in y, and its friction scales by 0.9 to 1.1 and stays in 0 to 1.
 fn perturb(creature: &mut evolution_simulator::evolution::Creature) {
     let mut rng = evolution_simulator::evolution::Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
     for node in &mut creature.nodes {
