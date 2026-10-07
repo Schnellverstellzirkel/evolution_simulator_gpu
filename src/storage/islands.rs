@@ -1,3 +1,9 @@
+//! The island layout of the search: how many archives there are and where
+//! each one sits in `Experiment::islands`. It also holds the steps of the
+//! generation boundary that move bodies between archives. They refine the main
+//! islands' archives, graduate the nurseries into their islands, migrate the
+//! best elites to the hub and pass stepping stones around the isolated islands.
+
 use super::*;
 
 /// Generations between the stepping stones of the island ring.
@@ -5,50 +11,60 @@ const STONE_INTERVAL: u32 = 50;
 /// Generations a graduate is protected against bodies of other plans.
 const GRADUATE_GRACE: u32 = 3;
 
-/// What one island's nursery graduated this session.
+/// One island's record of what a nursery graduated this session. An island
+/// has one for its nursery of new random bodies and one for its nursery of
+/// reshaped bodies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Graduation {
     /// Generation of the last graduation (0 before the first).
     pub generation: u32,
-    /// Bodies in the last graduating cohort, and how many the island kept.
+    /// Bodies in the last graduating cohort.
     pub sent: usize,
+    /// How many of those bodies the island kept.
     pub kept: usize,
     /// Bodies the island kept over all graduations this session.
     pub kept_total: usize,
 }
 
-/// Island archives: `ISOLATED_ISLANDS` isolated islands, then the hub.
-/// Slot `i` breeds from and competes in island `qd::island_of_slot`.
+/// How many islands there are: the `ISOLATED_ISLANDS` isolated islands, the
+/// hub, then the `qd::WILD_ISLANDS` (100) wild islands. The first
+/// `qd::MAIN_ISLANDS` run in the player's world, and each wild island runs in a
+/// world of its own. Ring slot `i` belongs to island
+/// `qd::island_of_slot(i, island_count())`.
 pub fn island_count() -> usize {
     qd::MAIN_ISLANDS + qd::WILD_ISLANDS
 }
-/// Archives that creatures breed for and compete in: the islands, then one
-/// nursery of new random bodies per island, then one nursery of reshaped
+/// How many archives creatures breed for and compete in: the islands, then
+/// one nursery of new random bodies per island, then one nursery of reshaped
 /// bodies per island. `Experiment::islands` holds them in this order.
 pub fn arena_count() -> usize {
     island_count() * qd::ARENA_KINDS
 }
-/// The nursery archive of new random bodies of `island` in
-/// `Experiment::islands`.
+/// The index in `Experiment::islands` of the nursery of new random bodies of
+/// `island`.
 pub fn nursery_of(island: usize) -> usize {
     island_count() + island
 }
-/// The nursery archive of reshaped bodies of `island`.
+/// The index in `Experiment::islands` of the nursery of reshaped bodies of
+/// `island`.
 pub fn reshaped_of(island: usize) -> usize {
     2 * island_count() + island
 }
-/// An empty nursery of reshaped bodies of a main island. It starts in the refined layout, so
-/// a new body plan has a cell of its own against the bodies of other shapes
-/// and sizes, and the nursery holds four times as many bodies as one that
-/// keeps one elite per way of moving.
+/// An empty nursery of reshaped bodies of a main island. It starts in the
+/// refined layout, so a new body plan has a cell of its own against the bodies
+/// of other shapes and sizes. The nursery then holds up to nine times as many
+/// bodies as one that keeps one elite per way of moving, because
+/// `qd::ISLAND_CLASSES` has nine body classes.
 pub(super) fn new_reshaped_nursery() -> QdArchive {
     let mut archive = QdArchive::default();
     archive.set_refined(true);
     archive
 }
-/// Empty archives for the islands and their two nurseries each. `refined`
-/// says which islands start in the refined layout. The others, and the
-/// nursery of new random bodies, keep one elite per way of moving.
+/// Empty archives for the islands and their two nurseries each, in the order
+/// of `Experiment::islands`. `refined[i]` says whether archive `i` starts in
+/// the refined layout, and a missing entry says no. The nurseries of reshaped
+/// bodies of the main islands always start refined. An archive that nothing
+/// marks keeps one elite per way of moving.
 pub(super) fn new_islands(refined: &[bool]) -> Vec<QdArchive> {
     (0..arena_count())
         .map(|arena| {
@@ -61,26 +77,35 @@ pub(super) fn new_islands(refined: &[bool]) -> Vec<QdArchive> {
         })
         .collect()
 }
-/// Islands that never receive immigrants and breed only from their own
-/// elites, so each one evolves its own designs.
+/// How many isolated islands there are, the first islands. Each breeds from
+/// its own archive, so each evolves its own designs. Bodies from other islands
+/// reach one only as a stepping stone from the previous isolated island
+/// (`Experiment::step_stones`) or through the founder bank, which all the main
+/// islands share. Migration never sends anything to an isolated island.
 pub const ISOLATED_ISLANDS: usize = 4;
-/// The hub island: every `MIGRATION_INTERVAL` generations it receives copies
-/// of each isolated island's best elites, and it breeds from its own archive
-/// like any island. Nothing flows from the hub back.
+/// The index of the hub island, which comes right after the isolated islands.
+/// Every `MIGRATION_INTERVAL` generations it receives copies of each isolated
+/// island's best elites and of each wild island's best
+/// (`Experiment::migrate_islands`), and it breeds from its own archive like
+/// any island. Migration sends nothing back from the hub.
 pub fn hub_island() -> usize {
     ISOLATED_ISLANDS
 }
 
-/// Generations between migrations to the hub, and the share of each
-/// isolated island's elites copied to it.
+/// Generations between migrations to the hub.
 pub const MIGRATION_INTERVAL: u32 = 25;
-
+/// The share of an island's elites, the fastest first, that it sends to the
+/// hub at a migration. Each isolated island and each wild island sends this
+/// share.
 pub const MIGRATION_SHARE: f32 = 0.1;
 
 impl Experiment {
-    /// Creates empty island archives if they are missing. They fill from
-    /// their own slots' offspring (and queued reseeds). The global archive
-    /// is never split among them, because that would mix the islands.
+    /// Creates the empty archives of the islands and their nurseries when
+    /// `islands` does not hold `arena_count()` of them, as in a new game. It
+    /// also clears the progress records, the graduation logs and the last
+    /// migration. The archives fill from the offspring of their own slots and
+    /// from queued reseeds. The global archive is never split among them,
+    /// because that would mix the islands.
     pub(super) fn ensure_islands(&mut self) {
         if self.islands.len() == arena_count() {
             return;
@@ -91,13 +116,15 @@ impl Experiment {
         self.reshaped_graduations.clear();
         self.last_migration = None;
     }
-    /// Refines each island whose archive is `qd::REFINE_AFTER` generations
-    /// old: its elites move to the cells of their body classes, and from then
-    /// on a body of another shape or size has a cell of its own. Until then
-    /// an island keeps one elite per way of moving, so the climb of a new game
-    /// pools its lineages as the old archive did. A refined archive stays
-    /// refined through a world change (`reset_search_context`), and the
-    /// nurseries of new random bodies never refine.
+    /// Refines the archives of the main islands as they age. An island that is
+    /// `qd::REFINE_AFTER` generations old moves its elites to the cells of
+    /// their body classes, and from then on a body of another shape or size has
+    /// a cell of its own. Isolated island `i` waits `10 * i` generations
+    /// longer. Until then an island keeps one elite per way of moving, so the
+    /// climb of a new game pools its lineages as the old archive did. A
+    /// refined archive stays refined through a world change
+    /// (`reset_search_context`). The wild islands and the nurseries of new
+    /// random bodies never refine.
     pub(super) fn refine_archives(&mut self) {
         for island in 0..island_count().min(self.islands.len()) {
             // A wild island keeps one elite per way of moving: a hundred
@@ -121,11 +148,13 @@ impl Experiment {
             }
         }
     }
-    /// Every `NURSERY_GENERATIONS` generations each island takes the bodies
-    /// of its nurseries that beat its elites, and the global archive takes
-    /// those the island kept. The nursery of new random bodies starts over
-    /// with new random bodies. The nursery of reshaped bodies keeps every
-    /// body and goes on tuning it.
+    /// Every `qd::NURSERY_GENERATIONS` generations each island takes the
+    /// bodies of its nurseries that beat its elites, and the global archive
+    /// takes those the island kept. The nursery of new random bodies is
+    /// emptied, its morphology reserve with it, and starts over with new
+    /// random bodies. The nursery of reshaped bodies keeps every body and goes
+    /// on tuning it. The graduation logs record each cohort. Afterwards the
+    /// islands and the global archive refresh their behavior scores.
     pub(super) fn graduate_nurseries(&mut self) {
         if self.islands.len() != arena_count()
             || self.generation == 0
@@ -185,8 +214,9 @@ impl Experiment {
             self.archive.refresh_behavior_scores();
         }
     }
-    /// The behavior scores of the nurseries of reshaped bodies, which take
-    /// offers in every block, are refreshed once a generation.
+    /// Refreshes the behavior scores of the nurseries of reshaped bodies, side
+    /// by side. They take offers in every block, so they refresh once a
+    /// generation and not after each block.
     pub(super) fn refresh_reshaped_scores(&mut self) {
         if self.islands.len() == arena_count() {
             self.islands[reshaped_of(0)..reshaped_of(island_count())]
@@ -196,7 +226,9 @@ impl Experiment {
     }
     /// Offers `elites` to `island`, fastest first, marked as graduates: each
     /// takes the cell of an island elite it beats, or an empty cell, and the
-    /// global archive takes those the island kept. Returns how many it kept.
+    /// global archive takes those the island kept. The island protects a
+    /// graduate it keeps for `GRADUATE_GRACE` generations, and the developer
+    /// switch `BIO_OFF` bit 16 removes that. Returns how many it kept.
     fn offer_to_island(&mut self, island: usize, elites: &mut [qd::Elite]) -> usize {
         elites.sort_unstable_by(|a, b| {
             b.fitness
@@ -222,8 +254,12 @@ impl Experiment {
         kept
     }
     /// Every `MIGRATION_INTERVAL` generations the hub receives copies of the
-    /// best share of each isolated island's elites. The isolated islands
-    /// never receive any.
+    /// fastest `MIGRATION_SHARE` of each isolated island's elites. Each wild
+    /// island also sends its fastest share to the hub's pen. Nothing goes to an
+    /// isolated island here. `last_migration` records, per island, how many
+    /// elites it sent and how many the hub kept. For a wild island the hub has
+    /// kept none yet, because its migrants have still to run in the hub's
+    /// world.
     pub(super) fn migrate_islands(&mut self) {
         if self.islands.len() != arena_count()
             || !self.generation.is_multiple_of(MIGRATION_INTERVAL)
@@ -251,11 +287,11 @@ impl Experiment {
             let kept = group.iter().filter(|elite| to.absorb(elite)).count();
             exchange[from] = (group.len(), kept);
         }
-        // A wild island sends its best tenth by its own world's distance. Each
-        // runs once as it is in the hub's world and takes a cell if it is
-        // fast enough there; and it enters the hub's pen, where it breeds in
-        // the hub's slots for `PEN_GENERATIONS` generations so its line can
-        // adapt to the hub's world before it is dropped (owner).
+        // A wild island sends its fastest tenth, ranked by distance in its own
+        // world. Each of them runs once in the hub's world and takes a cell if
+        // it is fast enough there. Each also enters the hub's pen, where it
+        // breeds in the hub's slots for `PEN_GENERATIONS` generations, so its
+        // line can adapt to the hub's world before it is dropped (owner).
         let until = self.generation + PEN_GENERATIONS;
         #[allow(clippy::needless_range_loop)]
         for from in qd::MAIN_ISLANDS..island_count() {
@@ -279,9 +315,10 @@ impl Experiment {
         self.islands[hub].refresh_behavior_scores();
     }
     /// Every `STONE_INTERVAL` generations each isolated island sends one
-    /// elite to the next island in a ring: the fastest elite of its rarest
-    /// body plan, so isolation is almost kept and a rare design gets a second
-    /// home (Cantu-Paz, 2000, migration topologies).
+    /// elite to the next isolated island in a ring: the fastest elite of its
+    /// rarest body plan, so isolation is almost kept and a rare design gets a
+    /// second home (Cantu-Paz, 2000, migration topologies). The developer
+    /// switch `BIO_OFF` bit 128 turns it off.
     pub(super) fn step_stones(&mut self) {
         if qd::bio_off(128)
             || self.islands.len() != arena_count()
