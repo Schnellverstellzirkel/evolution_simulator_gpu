@@ -62,6 +62,7 @@ impl GifCamera {
     fn origin_x(&self, center_x: f32) -> f32 {
         center_x - self.anchor_x / self.scale
     }
+    /// Screen position in pixels for a world position.
     fn screen(&self, origin_x: f32, position: [f32; 2]) -> (f32, f32) {
         (
             (position[0] - origin_x) * self.scale,

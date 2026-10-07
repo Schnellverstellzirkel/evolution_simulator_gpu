@@ -42,7 +42,9 @@ impl std::hash::Hasher for KeyHasher {
 }
 /// A map hashed with `KeyHasher`.
 pub type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<KeyHasher>>;
+/// A map from creature id or plan key to values, hashed with `KeyHasher`.
 pub type KeyMap<V> = FastMap<u64, V>;
+/// A set of creature ids or plan keys, hashed with `KeyHasher`.
 pub type KeySet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<KeyHasher>>;
 
 mod archive;
@@ -127,9 +129,11 @@ impl Stats {
 /// How a creature in the ring was bred.
 #[derive(Clone, Copy, Debug)]
 pub struct Birth {
+    /// Which emitter produced it.
     pub emitter: Emitter,
     /// The CMA emitter that sampled it.
     pub cma: Option<usize>,
+    /// Its parent's id, if any.
     pub parent_id: Option<u64>,
     /// It came from crossover.
     pub mate: bool,
@@ -177,7 +181,7 @@ impl Block {
     }
     /// Which window creature `j`'s distance at the screen belongs to: 0 for
     /// the evolved creatures, 1 for the nursery's new bodies, 2 for its
-    /// reshaped bodies.
+    /// reshaped bodies, 3 for a wild island's creatures.
     fn screen_class(&self, j: usize) -> usize {
         if qd::is_wild(qd::island_of_slot(self.first + j, island_count())) {
             return 3;

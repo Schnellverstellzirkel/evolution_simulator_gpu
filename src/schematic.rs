@@ -88,6 +88,7 @@ impl Scene<'_> {
         );
         self.flat(r, fill, round, outline);
     }
+    /// Draws a filled rectangle without shadow (unlike `block`).
     fn flat(&self, r: Rect, fill: Color32, round: f32, outline: f32) {
         self.p.rect(
             r,
@@ -371,6 +372,7 @@ fn hub(s: &Scene, snap: Option<&Snapshot>) {
     );
 }
 
+/// Island `index`: its card, its niche plots and its leader.
 fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     let (cx, cy) = ISLAND_CENTERS[index];
     // Rock underside, then the grass top.
@@ -387,6 +389,7 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
         ROCK,
         3.5,
     );
+    // Rock crevices for visual texture.
     for ((ax, ay), (bx, by)) in [((-60.0, 40.0), (-20.0, 66.0)), ((52.0, 36.0), (30.0, 64.0))] {
         s.p.line_segment(
             [s.at(cx + ax, cy + ay), s.at(cx + bx, cy + by)],
@@ -423,6 +426,7 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
             7.0,
             2.5,
         );
+        // Plot 1 is the leader's, drawn below.
         if i != 1 && i < planted {
             let phase = s.t * 3.0 + (index * 6 + i) as f32 * 1.3;
             s.critter(
@@ -514,6 +518,7 @@ fn boat(s: &Scene, x: f32, y: f32, tint: Color32, bob: f32) {
     }
 }
 
+/// Draws an emitter card showing its name, description, and breeding share percentage.
 fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>, y: f32, h: f32) {
     let (name, what) = match Emitter::ALL[index] {
         Emitter::Cma => (
@@ -563,6 +568,7 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>, y: f32, h: f32) {
     s.card_text(area, what, 19.0);
 }
 
+/// Draws the trial arena with the 5 s gate, finish line, and record confirmation rules.
 fn arena(s: &Scene) {
     s.card((1290.0, 84.0, 450.0, 356.0), RED, 3, "Trial arena");
     let (lx, ly, lw, lh) = (1308.0, 148.0, 414.0, 92.0);

@@ -88,7 +88,7 @@ impl App {
                 }
                 ui.menu_button("View", |ui| {
                     // The new scale applies when the drag ends: scaling the
-                    // UI under the pointer mid-drag moves the slider and threw
+                    // UI under the pointer mid-drag moves the slider and throws
                     // it to the other end.
                     let slider = ui.add(
                         egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"),

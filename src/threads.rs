@@ -11,6 +11,7 @@
 
 use std::sync::OnceLock;
 
+/// CPU cores where the worker, GPU engine, and Rayon pool run.
 struct Layout {
     worker: Option<usize>,
     engine: Option<usize>,

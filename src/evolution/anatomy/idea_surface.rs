@@ -202,11 +202,8 @@ fn spread_nodes(c: &mut Creature, factor: f32) -> bool {
         return false;
     }
     let n = nodes.len() as f32;
-    let (sum_d, sum_f) = nodes.iter().fold((0.0, 0.0), |(d, f), &i| {
-        (d + c.nodes[i].diameter, f + c.nodes[i].friction)
-    });
-    let mean_d = sum_d / n;
-    let mean_f = sum_f / n;
+    let mean_d = nodes.iter().map(|&i| c.nodes[i].diameter).sum::<f32>() / n;
+    let mean_f = nodes.iter().map(|&i| c.nodes[i].friction).sum::<f32>() / n;
     let mut changed = false;
     for &i in &nodes {
         let d = mean_d + factor * (c.nodes[i].diameter - mean_d);

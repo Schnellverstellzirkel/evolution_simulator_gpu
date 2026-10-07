@@ -443,6 +443,7 @@ impl std::error::Error for CudaError {}
 
 static API: std::sync::OnceLock<Result<Arc<Api>, String>> = std::sync::OnceLock::new();
 
+/// The CUDA driver and NVRTC compiler, shared by all engines.
 fn api() -> Result<Arc<Api>> {
     API.get_or_init(|| {
         let cu = Driver::load().map_err(|e| format!("{e:#}"))?;
@@ -469,6 +470,7 @@ struct KernelKey {
     fidelity: Fidelity,
 }
 
+/// A compiled CUDA kernel module and function with occupancy information.
 struct Kernel {
     module: CuModule,
     function: CuFunction,
@@ -485,6 +487,7 @@ struct DeviceBuf {
     size: usize,
 }
 
+/// A buffer allocated in pinned host memory for direct GPU transfers.
 struct HostBuf {
     ptr: *mut u8,
     size: usize,
@@ -673,6 +676,7 @@ struct Slot {
     pending: Option<Pending>,
 }
 
+/// A GPU submission queued on a slot, waiting for results.
 struct Pending {
     ticket: u64,
     /// The unit's batches: their buffers are copied from until the
@@ -684,6 +688,7 @@ struct Pending {
     frames: Option<(usize, usize)>,
 }
 
+/// The engine of one CUDA GPU: it scores creatures and records replays.
 pub struct CudaEngine {
     api: Arc<Api>,
     device: CuDevice,

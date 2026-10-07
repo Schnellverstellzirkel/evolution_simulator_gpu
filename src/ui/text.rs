@@ -84,6 +84,7 @@ pub(super) fn seconds_text(seconds: f64) -> String {
         format!("{:.0} h", seconds / 3600.0)
     }
 }
+/// `n` with commas between thousands: 1,234,567.
 pub(super) fn number(n: usize) -> String {
     let text = n.to_string();
     let mut out = String::new();

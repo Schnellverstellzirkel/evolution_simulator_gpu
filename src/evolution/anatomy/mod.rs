@@ -256,7 +256,7 @@ pub(super) fn graft_from(c: &mut Creature, cfg: &Config, rng: &mut Rng, donor: &
 }
 /// The controller operators (`controller.rs`) share a second pick slot. With a
 /// slot each they looked slightly worse in the search (9 seeds), so they
-/// share one as the gentle group does.
+/// share one as the `SHARED_SLOT` operators do.
 const CONTROLLER_SLOT: &[&str] = &[
     "limb_stroke_scale",
     "limb_posture_shift",
@@ -311,7 +311,7 @@ pub(super) fn is_compound(index: usize) -> bool {
 pub(super) struct Enabled {
     /// For each operator, whether it is a compound one (`COMPOUND`).
     pub compound: Vec<bool>,
-    /// Operators with a pick slot each.
+    /// Operators with a pick slot each (not in a shared group or gait file).
     pub single: Vec<usize>,
     /// Operators that share one pick slot (`SHARED_SLOT`).
     pub shared: Vec<usize>,

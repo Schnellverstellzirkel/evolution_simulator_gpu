@@ -3,6 +3,7 @@
 //! layout of a recorded frame.
 use crate::physics::Node;
 
+/// One creature's trial as the kernel reports it: its fitness and behavior scores.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuResult {
@@ -117,6 +118,7 @@ impl RungTrace {
     pub fn steps(&self) -> u32 {
         self.words[2] >> 16
     }
+    /// Whether the creature fell during the trial.
     pub fn fell(&self) -> bool {
         self.code() & 16 != 0
     }

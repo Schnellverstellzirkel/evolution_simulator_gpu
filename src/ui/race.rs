@@ -104,7 +104,6 @@ impl App {
         }
     }
     /// The top archived elites running side by side, with live standings.
-    /// The top archived elites running side by side, with live standings.
     pub(super) fn race_view(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         self.race_header(ui, theme);

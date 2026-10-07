@@ -28,6 +28,7 @@ pub struct Forces {
     pub broken: Vec<u64>,
 }
 
+/// Position at fraction `t` along `bone` in `frame`.
 fn along_bone(frame: &[[f32; 2]], bone: &crate::evolution::Bone, t: f32) -> [f32; 2] {
     let a = frame[bone.a as usize];
     let b = frame[bone.b as usize];

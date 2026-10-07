@@ -312,9 +312,8 @@ pub(crate) fn scale_limb_strength(
         return false;
     };
     let factor = rng.range(0.6f32.ln(), 1.6f32.ln()).exp();
-    let active_muscles = active(c, root);
     let mut changed = false;
-    for i in active_muscles {
+    for i in active(c, root) {
         let m = &mut c.muscles[i];
         let stiffness = (m.stiffness * factor).clamp(1.0, 120.0);
         changed |= stiffness != m.stiffness;
@@ -632,7 +631,6 @@ impl IntoIterator for Partners {
             .into_iter()
     }
 }
-/// Matching limb pairs with actuated parent bones in both orders.
 fn partners(c: &Creature) -> Partners {
     let matching = matching_limbs(c);
     let limbs: Limbs = matching

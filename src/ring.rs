@@ -57,6 +57,7 @@ pub struct Step {
     pub chain: f64,
 }
 
+/// The blocks in flight, in ring order.
 #[derive(Default)]
 pub struct Ring {
     flights: VecDeque<Flight>,

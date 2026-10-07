@@ -17,7 +17,9 @@ pub enum Art {
     SkyDusk,
     /// Skyline layers, far to near, each tiling sideways.
     SkylineFar,
+    /// Mid skyline layer.
     SkylineMid,
+    /// Near skyline layer.
     SkylineNear,
     /// Surface materials, each tiling both ways.
     ConcreteDark,
@@ -35,6 +37,7 @@ pub enum Art {
     Glow,
 }
 
+/// Every art variant, in enum order.
 const ALL: [Art; 17] = [
     Art::SkyCity,
     Art::SkyStorm,
@@ -56,6 +59,7 @@ const ALL: [Art; 17] = [
 ];
 
 impl Art {
+    /// Raw encoded bytes of this image.
     fn bytes(self) -> &'static [u8] {
         match self {
             Art::SkyCity => include_bytes!("../assets/ui/sky/city.jpg"),
@@ -83,12 +87,14 @@ impl Art {
         !matches!(self, Art::Sphere | Art::Glow)
     }
 
+    /// Cache slot for this image's texture and size, filled on first access.
     fn slot(self) -> &'static OnceLock<(TextureHandle, [usize; 2])> {
         static SLOTS: [OnceLock<(TextureHandle, [usize; 2])>; ALL.len()] =
             [const { OnceLock::new() }; ALL.len()];
         &SLOTS[self as usize]
     }
 
+    /// Decodes and uploads this image to the GPU, returning its texture and size.
     fn load(self, ctx: &egui::Context) -> (TextureHandle, [usize; 2]) {
         let image = image::load_from_memory(self.bytes())
             .map(|image| image.to_rgba8())

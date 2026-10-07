@@ -18,7 +18,7 @@ use std::time::Instant;
 /// What a line of the event feed lets the player do.
 #[derive(Clone, Copy)]
 enum FeedAction {
-    /// Replay the best creature of this history row.
+    /// Replay the best creature of this history row (index into `history`).
     Replay(usize),
     /// Replay the champion now, whose record no history row holds yet.
     ReplayChampion,
@@ -57,6 +57,7 @@ struct FeedItem {
     generation: u32,
     text: String,
     color: Color32,
+    /// Button action if the player clicks this line, or `None` if read-only.
     action: Option<FeedAction>,
 }
 impl App {

@@ -20,6 +20,8 @@ fn trace(d60: f32, d150: f32, d300: f32, steps: u32, bands: [u16; 2]) -> RungTra
     }
 }
 
+/// An audit row of a creature that reaches the 5 s bar (`pass3`) or not,
+/// its distances offset by `jitter`.
 fn row(pass3: bool, exempt: bool, jitter: f32) -> AuditRow {
     // Creatures that pass 5 s are further along at 2.5 s.
     let d150 = if pass3 { 3.0 + jitter } else { 0.5 + jitter };
@@ -168,7 +170,8 @@ fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
     assert_eq!(parent_exemptions(&rules, Some(&fast), true), 0);
     // A weak elite that the rules stop is where the rules should work.
     assert_eq!(parent_exemptions(&rules, Some(&slow), false), 0);
-    // An elite with no profile (an old save, a trial with no trace).
+    // An elite with no profile (an old save, a trial with no trace) or an
+    // all-zero one is exempt from both rungs.
     assert_eq!(parent_exemptions(&rules, None, true), EXEMPT_R1 | EXEMPT_R2);
     assert_eq!(
         parent_exemptions(&rules, Some(&[0; 2 * FEATURES]), true),

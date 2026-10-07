@@ -78,7 +78,6 @@ struct Slot {
 }
 
 impl Slot {
-    /// Determines the girdle (0 is front) and side (0 or 1) for a leg at this rank.
     fn of(rank: usize, legs: usize) -> Self {
         Self {
             girdle: rank / 2,
@@ -122,20 +121,10 @@ fn retime_leg(c: &mut Creature, leg: &Leg, target: f32) -> bool {
 /// measured from the first leg, which stays where it is.
 fn set_pattern(c: &mut Creature, legs: &[Leg], offset: impl Fn(Slot) -> f32) -> bool {
     let origin = c.muscles[legs[0].lead].phase;
-    let girdles = legs.len().div_ceil(2);
-    let base = offset(Slot {
-        girdle: 0,
-        side: 0,
-        girdles,
-    });
+    let base = offset(Slot::of(0, legs.len()));
     let mut changed = false;
     for (rank, leg) in legs.iter().enumerate() {
-        let slot = Slot {
-            girdle: rank / 2,
-            side: rank % 2,
-            girdles,
-        };
-        let target = origin + offset(slot) - base;
+        let target = origin + offset(Slot::of(rank, legs.len())) - base;
         changed |= retime_leg(c, leg, target.rem_euclid(1.0));
     }
     changed

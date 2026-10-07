@@ -56,6 +56,7 @@ const OPTIMIZER_SHARE: f32 = 0.5;
 /// How many of an island's fastest elites the breeding plan ranks.
 const FASTEST_ELITES: usize = 512;
 
+/// Planned offspring for one breeding slot before CMA slots are assigned.
 struct OffspringPlan {
     plan: CandidatePlan,
     parent_id: Option<u64>,
@@ -97,6 +98,7 @@ impl Experiment {
         // and compares without cloning the topology vector; clones are only
         // paid when a slot is created or replaced.
         type CmaKey = (usize, qd::Niche, u64);
+        /// Lookup of CMA emitter indices keyed by (island, niche, body plan).
         struct CmaLookup {
             buckets: KeyMap<Vec<(CmaKey, usize)>>,
         }
@@ -155,12 +157,15 @@ impl Experiment {
         // archive. Each creature has its own deterministic RNG, so parallel order
         // does not change the draws. last_parent is snapshotted instead of updating
         // mid-loop; visit() and CMA slot allocation stay sequential below.
+        /// Prepared breeding plan for one offspring: emitter, parents, and flags.
         struct PlanPrep {
             emitter: Emitter,
             parent: Option<usize>,
             parent_id: Option<u64>,
+            /// Generation up to which the offspring is protected.
             protection: u32,
             emitter_stale: bool,
+            /// Elite index for crossover mate, if any.
             mate: Option<usize>,
             island: usize,
             /// A fast elite whose design's optimizer breeds this offspring.

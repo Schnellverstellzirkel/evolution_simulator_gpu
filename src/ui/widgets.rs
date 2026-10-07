@@ -6,7 +6,9 @@ use eframe::egui::{self, Color32, Sense, Vec2};
 /// Choice buttons that keep their frame, so every option reads as a
 /// button and the chosen one is filled.
 pub(super) trait Choices {
+    /// Draws a button that looks selected when `selected` is true.
     fn pick(&mut self, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response;
+    /// Draws a button for `value` and updates `current` to `value` when clicked.
     fn choice<T: PartialEq>(
         &mut self,
         current: &mut T,
@@ -67,6 +69,7 @@ pub(super) fn speed_picker(ui: &mut egui::Ui, speed: &mut f32, id: &str) {
         .response
         .on_hover_text("Playback speed of the replay");
 }
+/// The color of the body type with `n` nodes and `m` muscles.
 pub(super) fn species_color(n: usize, m: usize) -> Color32 {
     // Muted hues, like paint on old machinery.
     egui::ecolor::HsvaGamma {

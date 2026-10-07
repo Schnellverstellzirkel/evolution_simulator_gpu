@@ -300,8 +300,8 @@ fn asymmetric_range_for_hop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
 
 // Allometry.
 
-/// A leg's bone lengths scale with the cube root of the count of bones
-/// below each bone, so roots grow and tips shrink.
+/// A leg's bone lengths scale with the cube root of the mass each bone
+/// carries (the bones below it), so roots grow and tips shrink.
 fn allometric_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;

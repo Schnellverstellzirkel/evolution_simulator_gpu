@@ -185,13 +185,10 @@ fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
 pub struct Muscle {
-    /// Bone index this muscle attaches to.
     pub bone_a: u32,
-    /// Bone index this muscle attaches to.
     pub bone_b: u32,
     /// Attachment positions measured from each bone's `a` endpoint.
     pub anchor_a: f32,
-    /// Attachment position measured from bone_b's `a` endpoint.
     pub anchor_b: f32,
     /// Shortest contraction length (m).
     pub short: f32,
@@ -203,7 +200,6 @@ pub struct Muscle {
     pub phase: f32,
     /// Fraction of cycle the muscle is active, 0 to 1.
     pub duty: f32,
-    /// Target force as a multiplier of the muscle's mass times gravity.
     pub stiffness: f32,
     /// Which of the four attachment endpoints (bone_a.a, bone_a.b, bone_b.a,
     /// bone_b.b) senses touchdowns, or `NO_SENSOR`.

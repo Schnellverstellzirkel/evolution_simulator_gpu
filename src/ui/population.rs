@@ -56,6 +56,7 @@ impl CardFilter {
     }
 }
 impl App {
+    /// Renders the Ways of moving tab: archive cards, heat map, or islands view.
     pub(super) fn population(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         self.population_header(ui, theme);
@@ -734,6 +735,7 @@ fn paint_card(
         score_color,
     );
 }
+/// How a creature came to be, in the words the lineage uses.
 fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
     match emitter {
         crate::qd::Emitter::Cma => "fine-tuned from a parent",

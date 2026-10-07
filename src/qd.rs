@@ -79,9 +79,11 @@ pub const GLOBAL_CLASSES: Classes = Classes {
     size_names: SIZE_NAME_SETS[GLOBAL_NODES.len() + 1],
 };
 impl Classes {
+    /// Number of body shape classes (aspect ratio bins).
     pub const fn shapes(&self) -> usize {
         self.aspect.len() + 1
     }
+    /// Number of body size classes (node count bins).
     pub const fn sizes(&self) -> usize {
         self.nodes.len() + 1
     }
@@ -307,6 +309,7 @@ pub fn arena_of_slot(slot: usize, arenas: usize) -> usize {
 pub fn is_reshaped_arena(arena: usize, arenas: usize) -> bool {
     arenas >= ARENA_KINDS && arena >= 2 * (arenas / ARENA_KINDS)
 }
+/// The niche key of island `island`'s optimizer for cadence band `cadence`.
 pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
     let b = (island as u32).to_le_bytes();
     Niche([OPTIMIZER_NICHE_MARKER, b[0], b[1], b[2], b[3], cadence])
@@ -482,9 +485,8 @@ struct ParentTraits {
     body_novelty: Vec<f32>,
 }
 
-/// A short summary of a body for body novelty: node, bone and muscle counts,
-/// leaf count and total bone length.
-/// A body's summary for body novelty, read from its stored genes.
+/// A short summary of a body for body novelty, read from its stored genes: node,
+/// bone and muscle counts, leaf count and total bone length.
 fn body_embedding(c: &StoredCreature) -> [f32; 5] {
     let bones = c.bones();
     let mut has_child = [false; crate::evolution::MAX_NODES];
@@ -2211,9 +2213,11 @@ impl CmaEmitter {
     }
 }
 
+/// Whether coordinate `dimension` is a phase field that wraps modulo 1.
 fn is_phase_dimension(dimension: usize, phase_start: usize) -> bool {
     dimension >= phase_start && (dimension - phase_start) % 8 == 5
 }
+/// Phase difference wrapped to [-0.5, 0.5).
 fn wrap_phase(delta: f32) -> f32 {
     (delta + 0.5).rem_euclid(1.0) - 0.5
 }
@@ -2404,6 +2408,7 @@ impl Layout {
     }
 }
 
+/// Physical CMA parameters in absolute units for optimizer search.
 fn parameters(creature: &Creature) -> Vec<f32> {
     let mut output = vec![
         0.0;

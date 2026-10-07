@@ -179,6 +179,8 @@ pub fn body_into(genes: &[NodeGene], bones: &[Bone], nodes: &mut [Node]) {
     add_bone_masses(bones, nodes);
 }
 
+/// Adds half of each bone's mass to each of its nodes, and its organ's mass
+/// to both by where the organ sits (`organ_at`).
 fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
     let density = limits().bone_density;
     for bone in bones {
@@ -247,6 +249,7 @@ pub fn nodes(c: &Creature) -> Vec<Node> {
     add_muscle_masses(&c.bones, &c.muscles, &mut nodes);
     nodes
 }
+/// Target muscle length at `time` based on the muscle's waveform (period, phase, duty cycle).
 pub fn target(m: &Muscle, time: f32) -> f32 {
     let phase = (time / m.period + m.phase).fract();
     let wave = if phase < m.duty {
@@ -313,7 +316,7 @@ pub const PLANTED_SPEED: f32 = 0.01;
 pub const STATIC_EXTRA: f32 = 0.25;
 /// Slide speed (m/s) at which the static extra is gone.
 pub const STATIC_FADE_END: f32 = 0.02;
-/// The static factor, `1 + STATIC_EXTRA * clamp((STATIC_FADE_END - |v|) * 100, 0, 1)`.
+/// The static factor, `1 + STATIC_EXTRA * clamp((STATIC_FADE_END - |slide|) * 100, 0, 1)`.
 pub fn static_factor(slide: f32) -> f32 {
     1.0 + 0.25 * ((0.02 - slide.abs()) * 100.0).clamp(0.0, 1.0)
 }
@@ -638,6 +641,7 @@ pub fn ice(x: f32) -> f32 {
     let s = ((0.7 - t) * 2.5).clamp(0.0, 1.0);
     s * s * (3.0 - 2.0 * s)
 }
+/// Fitness as the center of mass's horizontal distance, or `FAILED` if any node failed.
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
         FAILED

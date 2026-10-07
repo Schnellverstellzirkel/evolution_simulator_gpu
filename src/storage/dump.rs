@@ -35,17 +35,28 @@
 use super::*;
 use std::io::{Seek, SeekFrom};
 
+/// The creature entered an island archive.
 pub const ISLAND: u8 = 1;
+/// The creature entered a nursery archive.
 pub const NURSERY: u8 = 2;
+/// The creature entered a morphology reserve.
 pub const RESERVE: u8 = 4;
+/// The creature entered the global archive.
 pub const GLOBAL: u8 = 8;
 
+/// The creature was produced by mating.
 pub const MATE: u8 = 1;
+/// Its CMA emitter was optimizing (`CmaEmitter::optimizing`).
 pub const OPTIMIZER: u8 = 2;
+/// Its fitness is its confirmation trial's (`EvaluationMetrics::fine`).
 pub const FINE: u8 = 4;
+/// An island elite run again in the dump's generation; it enters no archive.
 pub const RERUN: u8 = 8;
+/// The early screen stopped its trial.
 pub const SCREENED: u8 = 16;
+/// Its result enters no archive (`EvaluationMetrics::excluded`).
 pub const EXCLUDED: u8 = 32;
+/// The creature's parent was in a morphology reserve.
 pub const PARENT_RESERVE: u8 = 64;
 
 pub const MAGIC: &[u8; 8] = b"EVODUMP1";
@@ -133,6 +144,7 @@ pub struct Head {
     id: u64,
 }
 
+/// A serialized elite for the dump file.
 pub struct Elite {
     bytes: [u8; ELITE_BYTES],
     id: u64,
@@ -161,6 +173,7 @@ impl Elite {
     }
 }
 
+/// Writes a generation dump to track which creatures entered archives.
 pub struct Dump {
     path: std::path::PathBuf,
     file: BufWriter<File>,
@@ -234,9 +247,11 @@ impl Dump {
     pub fn rerun_count(&self) -> usize {
         self.reruns.len()
     }
+    /// Whether creatures are still being bred for the dump.
     pub fn breeding(&self) -> bool {
         self.bred < self.population
     }
+    /// Whether all breeding and block absorption is complete.
     pub fn finished(&self) -> bool {
         !self.breeding() && self.outstanding == 0
     }
@@ -301,11 +316,13 @@ impl Dump {
             self.outstanding += 1;
         }
     }
+    /// Takes the heads for ring block `k`, if one was bred for the dump.
     pub fn take_head(&mut self, k: usize) -> Option<Vec<Head>> {
         let head = self.heads.get_mut(k)?.take()?;
         self.outstanding -= 1;
         Some(head)
     }
+    /// Writes rows for creatures in a block, recording their archive and fitness data.
     pub fn write_rows(
         &mut self,
         population: &Population,

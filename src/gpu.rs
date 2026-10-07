@@ -4,8 +4,11 @@ use crate::{config::Config, evolution::Population, qd::EvaluationMetrics, schedu
 use anyhow::{Result, ensure};
 
 pub struct Gpu {
+    /// The names of the devices that evaluate.
     pub name: String,
+    /// Bytes allocated on the GPU.
     pub allocated_bytes: u64,
+    /// The scheduler for creature evaluation, or `None` if it failed to open.
     pub sched: Option<Scheduler>,
 }
 
@@ -26,6 +29,7 @@ impl Gpu {
             .as_ref()
             .map_or_else(|| self.name.clone(), Scheduler::names)
     }
+    /// Evaluates creatures by index and returns their fitness values.
     pub fn evaluate(
         &mut self,
         pop: &Population,
@@ -38,6 +42,7 @@ impl Gpu {
             .map(|result| result.fitness)
             .collect())
     }
+    /// Evaluates creatures by index and returns their evaluation metrics.
     pub fn evaluate_with_metrics(
         &mut self,
         pop: &Population,

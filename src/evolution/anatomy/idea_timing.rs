@@ -245,7 +245,7 @@ fn harmonic_ladder(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Contex
     if legs.len() < 2 {
         return false;
     }
-    let base = c.muscles.iter().fold(0.0f32, |max, m| max.max(m.period));
+    let base = c.muscles.iter().map(|m| m.period).fold(0.0f32, f32::max);
     let mut changed = false;
     for (i, leg) in legs.iter().enumerate() {
         let period = (base / (1 + i % 3) as f32).max(min_muscle_period());
@@ -325,8 +325,8 @@ fn swap_two_phases(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// A muscle with a touchdown sensor jumps ahead by 15–35% of a cycle when
-/// the foot lands, advancing the gait.
+/// A muscle with a touchdown sensor jumps 15 to 35% of a cycle ahead of its
+/// own phase when the foot lands, so each landing advances the gait.
 fn reset_advance(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let ahead = rng.range(0.15, 0.35);
     let mut changed = false;

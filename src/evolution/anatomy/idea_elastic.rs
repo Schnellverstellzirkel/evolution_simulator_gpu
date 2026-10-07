@@ -164,10 +164,9 @@ fn tendon_strip_one(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Contex
 /// stiffer, so it starts each pull already stretched and the tendon holds
 /// the energy.
 fn stretch_reserve(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    if c.muscles.is_empty() {
+    let Some(m) = pick(&(0..c.muscles.len()).collect::<Vec<_>>(), rng) else {
         return false;
-    }
-    let m = rng.index(c.muscles.len());
+    };
     let m = &mut c.muscles[m];
     let long = (m.long * 1.3).min(max_stroke().max(m.short));
     let tendon = (m.tendon + 0.2).min(1.0);

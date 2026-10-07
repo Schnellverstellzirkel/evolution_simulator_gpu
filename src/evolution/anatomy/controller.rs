@@ -92,7 +92,7 @@ pub(crate) fn taper_limb_strength(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: BoneIds = limb_roots(c)
+    let limbs: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).len() > 1)
         .collect();
@@ -282,8 +282,9 @@ pub(crate) fn limb_clock_lock(
     true
 }
 
-/// The leaf nodes (feet) of a muscle's two bones (excluding the root), as
-/// sensor indices (0 and 1 are the first bone's ends, 2 and 3 the second's).
+/// The foot nodes of a muscle's two bones (nodes with one bone, not the
+/// head), as sensor indices (0 and 1 are the first bone's ends, 2 and 3 the
+/// second's).
 fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> {
     let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
     [a.a, a.b, b.a, b.b]
@@ -408,7 +409,7 @@ pub(crate) fn snap_limb_phases(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: BoneIds = limb_roots(c)
+    let limbs: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).len() > 1)
         .collect();

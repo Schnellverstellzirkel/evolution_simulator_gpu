@@ -275,12 +275,9 @@ pub(crate) fn reshape_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
         return false;
     };
     let bones = branch(c, root);
-    let (mut low, mut high) = (0.7, 1.4);
-    for &b in &bones {
-        let l = c.bones[b].rest_length;
-        low = low.max(0.03 / l);
-        high = high.min(max_bone_length() / l);
-    }
+    let lengths = || bones.iter().map(|&b| c.bones[b].rest_length);
+    let low = lengths().map(|l| 0.03 / l).fold(0.7, f32::max);
+    let high = lengths().map(|l| max_bone_length() / l).fold(1.4, f32::min);
     let factor = rng.range(low.ln(), high.ln()).exp();
     if (factor - 1.0).abs() < 0.02 {
         return false;

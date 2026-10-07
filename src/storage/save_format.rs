@@ -3,9 +3,8 @@ use super::*;
 // The file starts with the magic, then a small uncompressed header
 // (`SaveHeader`), so the game can turn down a save it cannot use before it
 // reads gigabytes. The body keeps only the archives and the search state
-// (`SmallSave`). A loaded game breeds its population from the archives again
-// Any other magic is an older format
-// and is turned down.
+// (`SmallSave`). A loaded game breeds its population from the archives again.
+// Any other magic is an older format and is turned down.
 
 const MAGIC: &[u8; 8] = b"EVORUST8";
 
@@ -547,11 +546,11 @@ pub fn summary(path: &Path) -> Option<SaveSummary> {
         config: head.config,
     })
 }
+/// Loads the save at `path`.
 pub fn load(path: &Path) -> Result<Experiment> {
     load_with_progress(path, None)
 }
 
-/// `load`, counting the file bytes read into `progress`.
 /// One row per generation, in order, up to `generation`: a skipped
 /// generation gets a copy of the row before it, and a repeated one is dropped.
 fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
@@ -575,6 +574,7 @@ fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
     out
 }
 
+/// `load`, counting the file bytes read into `progress`.
 pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Experiment> {
     load_from(path, progress, false, None)
 }
@@ -659,6 +659,7 @@ fn load_from(
     Ok(experiment)
 }
 
+/// Writes `history` to a CSV file at `path`.
 pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;

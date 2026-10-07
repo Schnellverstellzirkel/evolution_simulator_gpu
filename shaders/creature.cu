@@ -584,6 +584,7 @@ struct Tally {
     unsigned rung_bits;
 };
 
+// One thread per creature: runs its trial and tallies its behavior.
 extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned* __restrict__ records,
     const float* __restrict__ muscles,

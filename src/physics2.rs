@@ -54,14 +54,19 @@ pub const WATER_ALONG: f32 = 0.25;
 pub const WATER_BUOYANCY: f32 = 0.7;
 /// Contact tolerance for the behavior metrics (m), as the current engine.
 pub(crate) const CONTACT_SLACK: f32 = 0.002;
+/// Height (m) above the ground at which a lifted node is considered airborne.
 pub(crate) const LIFT_CLEARANCE: f32 = 0.01;
 
 /// One muscle's constants.
 #[derive(Clone, Debug)]
 pub(crate) struct MuscleModel {
+    /// Index of the first bone this muscle pulls.
     pub(crate) bone_a: usize,
+    /// Index of the second bone this muscle pulls.
     pub(crate) bone_b: usize,
+    /// Anchor point along `bone_a` (0 to 1 along bone length).
     pub(crate) anchor_a: f32,
+    /// Anchor point along `bone_b` (0 to 1 along bone length).
     pub(crate) anchor_b: f32,
     /// Hill's relation as a factor on the shortening speed: 1 / (v_max
     /// times the muscle's length, at least 5 cm).
@@ -70,11 +75,16 @@ pub(crate) struct MuscleModel {
     /// tendon's stiffness (N/m; 0 without one).
     pub(crate) long: f32,
     pub(crate) tendon_k: f32,
+    /// Maximum contraction distance (m) during one cycle.
     pub(crate) amplitude: f32,
+    /// Inverse of muscle contraction period (1/s).
     pub(crate) inv_period: f32,
     pub(crate) phase: f32,
+    /// Fraction of cycle during active contraction.
     pub(crate) duty: f32,
+    /// Inverse of duty cycle.
     pub(crate) inv_duty: f32,
+    /// Inverse of the inactive fraction (1 - duty).
     pub(crate) inv_complement: f32,
     pub(crate) stiffness: f32,
     /// Force cap and energy store over the fixed `Limits` ones (at most 1):
@@ -82,6 +92,7 @@ pub(crate) struct MuscleModel {
     pub(crate) strength: f32,
     /// Node whose touchdown restarts the rhythm, if any.
     pub(crate) sensor: Option<usize>,
+    /// Phase offset to apply on sensor contact.
     pub(crate) reset: f32,
 }
 
@@ -90,9 +101,12 @@ pub(crate) struct MuscleModel {
 /// them.
 #[derive(Clone, Debug)]
 pub struct Model {
+    /// Mass of each node (kg).
     pub(crate) mass: Vec<f32>,
     pub(crate) radius: Vec<f32>,
+    /// Friction coefficient of each node.
     pub(crate) friction: Vec<f32>,
+    /// Sum of all node masses (kg).
     pub(crate) total_mass: f32,
     pub(crate) inv_mass: f32,
     /// Per bone: pivot node, child node (always the bone's index plus one),
@@ -113,17 +127,24 @@ pub struct Model {
     /// Earthquake bump phase and ground amplitude for this creature.
     pub(crate) quake_phase: f32,
     pub(crate) amplitude: f32,
+    /// Starting position of each node (x, y coordinates).
     pub(crate) start: Vec<[f32; 2]>,
 }
 
 /// A creature's state: the head and the neck, then relative joint angles.
 #[derive(Clone, Debug)]
 pub struct State {
+    /// Head position (x, y).
     pub(crate) x0: [f32; 2],
+    /// Head velocity (x, y).
     pub(crate) v0: [f32; 2],
+    /// Neck absolute angle (radians).
     pub(crate) th0: f32,
+    /// Neck angular velocity (rad/s).
     pub(crate) w0: f32,
+    /// Relative joint angles (radians).
     pub(crate) q: Vec<f32>,
+    /// Relative joint angular velocities (rad/s).
     pub(crate) qd: Vec<f32>,
     /// Derived by `kinematics`: absolute bone angles and rates, node
     /// positions and velocities.
@@ -133,6 +154,7 @@ pub struct State {
     pub(crate) vel: Vec<[f32; 2]>,
 }
 
+/// `a` wrapped into [-π, π).
 pub(crate) fn wrap(a: f32) -> f32 {
     let t = std::f32::consts::TAU;
     a - t * ((a + std::f32::consts::PI) / t).floor()
