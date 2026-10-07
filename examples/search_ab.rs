@@ -1,18 +1,23 @@
-//! Deterministic A/B harness for the evolutionary search, on the GPU.
+//! Fixed-seed A/B tool for the evolutionary search, on the GPU.
 //!
-//! Runs the game's ring (`ring::Ring` over the scheduler: every block is
-//! scored on the GPU with the early screen, the creatures that would set an
-//! island record get their confirmation trial, and the block is absorbed and
-//! bred again) on fixed seeds and prints comparable metrics, so a search
-//! change can be measured with the same command before and after. The GPU score is final. There is no CPU mode: a
-//! machine whose primary GPU does not open fails instead of falling back.
-//! Run it with `EVOLUTION_DEVICES=primary` and the GPU lock held shared.
+//! It runs the game's ring (`ring::Ring` over the scheduler) on fixed seeds,
+//! with the early screen, the early rungs and the record confirmation trials,
+//! and prints metrics that compare between runs. The same command measures a
+//! search change before and after. The GPU score is final, so there is no CPU
+//! mode and the tool fails when the primary GPU does not open. Run it with
+//! `EVOLUTION_DEVICES=primary` and the GPU lock held shared.
 //!
 //! Usage:
-//!   cargo run --release --example search_ab -- [generations] [population] [duration] [seed,seed,...] [--tag NAME]
-//!   cargo run --release --example search_ab -- <tag> [generations] [population] [duration] [seed,seed,...]
+//!   cargo run --release --example search_ab -- [generations] [population] [duration] [seed,seed,...] [options]
+//!   cargo run --release --example search_ab -- <tag> [generations] [population] [duration] [seed,seed,...] [options]
 //! Defaults: 2 generations, 64 creatures, 1.0 s trials, seeds 38,39.
-//! Wall time goes to stderr so stdout is deterministic and diffable.
+//! Options: --tag NAME, --seed-offset N, --seconds N, --effect Name=level,
+//! --change-at N, --load SAVE, --every N, --save PATH and --probe. The fields
+//! of `Options` say what each one does.
+//! Wall time goes to stderr so stdout is deterministic and diffable. Only
+//! `--seconds` makes a run depend on the wall clock.
+//! `EVOLUTION_AB_SAVE=<dir>` writes each seed's final game as
+//! `<dir>/seed-<seed>.evo`.
 #[path = "diversity_common/mod.rs"]
 mod diversity;
 use anyhow::{Context, Result};
@@ -29,28 +34,43 @@ const DEFAULT_GENERATIONS: u32 = 2;
 const DEFAULT_POPULATION: usize = 64;
 const DEFAULT_DURATION: f32 = 1.0;
 const DEFAULT_SEEDS: &[u64] = &[38, 39];
+/// How many of the fastest global elites the body mix and `print_robustness`
+/// look at.
 const TOP_BODIES: usize = 50;
 
+/// What the command line asks for (`options` reads it).
 struct Options {
     generations: u32,
     population: usize,
     duration: f32,
     seeds: Vec<u64>,
+    /// `--tag NAME`, or a first positional that is not a number. It names the
+    /// run and starts most lines on stdout.
     tag: Option<String>,
+    /// `--seed-offset N`: added to each seed to make the game's seed, so the
+    /// same seed list runs other games. It also moves the seed of a loaded
+    /// save. The output lines still show the seed from the list.
     seed_offset: u64,
+    /// `--probe`: after each generation, print a hash of the archive and a
+    /// hash of the ring. With the environment variable `PROBE_GPU` set it
+    /// also runs `probe_gpu` from generation 3 on.
     probe: bool,
+    /// `--save PATH`: write each seed's final game to PATH. With more than
+    /// one seed the last seed's game stays.
     save: Option<String>,
     /// `--seconds N`: stop after the generation that ends past N seconds of
-    /// wall time (the generation count is then a limit). Not deterministic.
+    /// wall time, counted for each seed (the generation count is then a
+    /// limit). Not deterministic.
     seconds: Option<f64>,
     /// `--effect Name=level`: environment effects to apply (level index) to a
-    /// new game, or with `--change-at` to the running one.
+    /// new game, or with `--change-at` to the running one. Repeat the option
+    /// for more effects.
     effects: Vec<(String, usize)>,
     /// `--change-at N`: change the world as a button press does, before
     /// generation N of this run, to the `--effect` levels or, with none, to
     /// the next autochange step.
     change_at: Option<u32>,
-    /// `--load PATH`: continue a save instead of starting a new game. The
+    /// `--load SAVE`: continue a save instead of starting a new game. The
     /// seed list then only names the run, and the population option sets
     /// the generation size.
     load: Option<String>,
@@ -59,9 +79,12 @@ struct Options {
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level] [--change-at N] [--load SAVE] [--every N]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level] [--change-at N] [--load SAVE] [--every N] [--save PATH] [--probe]"
 }
 
+/// Reads the command line. The positionals are the generation count, the
+/// population, the trial length in seconds and the comma-separated seeds, in
+/// that order. A first positional that is not a number is the tag.
 fn options() -> Result<Options> {
     let mut positionals: Vec<String> = Vec::new();
     let mut tag = None;
@@ -175,7 +198,9 @@ fn options() -> Result<Options> {
 }
 
 fn main() -> Result<()> {
-    // Low priority and the shared half-machine budget, like every other run.
+    // Low priority, and a Rayon pool of half the logical CPUs, at most eight
+    // (`engine::rayon_threads`). The game's own pool is larger
+    // (`threads::pool_threads`).
     engine::lower_thread_priority();
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(engine::rayon_threads())
@@ -195,6 +220,7 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(",")
     );
+    // The column names of the line `run_seed` prints for each generation.
     println!("{scope} seed generation best_m qd_score cells mean_nodes mean_muscles");
     let started = Instant::now();
     let (mut distances, mut scores) = (Vec::new(), Vec::new());
@@ -229,9 +255,13 @@ fn cpu_seconds() -> f64 {
     seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
-/// Scores the ring's first 20,000 creatures whole and in odd shuffled
-/// chunks, standard and confirmation trials, and reports creatures whose
-/// result differs by a bit.
+/// Checks that a creature's result does not depend on the batch it ran in.
+/// It scores the ring's first 20,000 creatures in one batch, then again in
+/// shuffled chunks of 2,999, once as standard trials and once as confirmation
+/// trials.
+/// For each kind it prints how many creatures differ in the bits of their
+/// fitness and, among the rest, in the bits of their mean height or ground
+/// contact.
 fn probe_gpu(sched: &mut scheduler::Scheduler, experiment: &Experiment) -> Result<()> {
     let n = experiment.ring_len().min(20_000);
     let mut ring = Population::default();
@@ -268,7 +298,9 @@ fn probe_gpu(sched: &mut scheduler::Scheduler, experiment: &Experiment) -> Resul
     Ok(())
 }
 
-/// Sets the named effects (`Name=level`) in `cfg`.
+/// Sets the named effects (`Name=level`) in `cfg`. A name matches without
+/// regard to case, and a level past the effect's last one sets the last one.
+/// An unknown name is an error.
 fn set_effects(cfg: &mut Config, effects: &[(String, usize)]) -> Result<()> {
     for (name, level) in effects {
         let effect = evolution_simulator::environment::EFFECTS
@@ -280,21 +312,26 @@ fn set_effects(cfg: &mut Config, effects: &[(String, usize)]) -> Result<()> {
     Ok(())
 }
 
-/// Runs the game's loop for one seed and returns its archive best and QD score.
+/// Runs the game's loop for one seed and prints its report lines to stdout.
+/// Most of them start with `scope`, the run's tag. It returns the best
+/// distance the global archive held at the end of a generation (since the
+/// last world change, `NaN` when it held none) and the archive's final QD
+/// score.
 fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
-    let cfg = Config {
+    let mut cfg = Config {
         population: options.population,
         duration: options.duration,
         random_seed: false,
         seed: seed + options.seed_offset,
         ..Config::default()
     };
-    let mut cfg = cfg;
     if options.change_at.is_none() {
         set_effects(&mut cfg, &options.effects)?;
     }
     cfg.validate()
         .with_context(|| format!("seed {seed} configuration"))?;
+    // The first CUDA device with "RTX 4060" in its name: this machine's
+    // compute GPU. Without it the tool fails.
     let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060")?;
     let mut experiment = match &options.load {
         Some(path) => {
@@ -319,6 +356,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     let first_generation = experiment.generation;
     let mut last_cpu = cpu_seconds();
     let mut best = f32::NAN;
+    // The `TOP_BODIES` fastest bodies after the last generation, for
+    // `print_body_mix`.
     let mut top = Vec::new();
     // Generations whose global best elite was born in a hub slot.
     let mut hub_best: Vec<u32> = Vec::new();
@@ -332,8 +371,10 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             break;
         }
         if options.change_at == Some(generation - first_generation) {
-            // A button press, or an autochange step: the archives clear and
-            // the islands' elites are tested again in the new world.
+            // A button press, or an autochange step. If the world changes,
+            // the global archive and the main islands start over, and the
+            // main islands' elites are tested again in the new world
+            // (`update_config_now`). The wild islands keep their own worlds.
             let before = experiment.config.clone();
             let mut cfg = before.clone();
             if options.effects.is_empty() {
@@ -351,6 +392,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
                 "{scope} {seed} {generation} world change: {}",
                 diversity::world_difference(&before, &experiment.config)
             );
+            // The old world's best says nothing about the new one.
             best = f32::NAN;
         }
         {
@@ -380,6 +422,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             }
         }
         if options.probe {
+            // Two hashes to compare runs by eye: the global archive's scores
+            // and creature ids, and the ring's genome ids and node positions.
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             for e in &experiment.archive.entries {
@@ -398,6 +442,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             }
             println!("trace gen {generation}: ring {:016x}", h.finish());
         }
+        // Host seconds of this generation spent absorbing results into the
+        // archives and breeding blocks again.
         let [archive_seconds, breeding_seconds] = std::mem::take(&mut experiment.stage_seconds);
         let cpu = cpu_seconds();
         // Elites of the global archive that entered or improved in this
@@ -413,6 +459,9 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             cpu - last_cpu
         );
         last_cpu = cpu;
+        // The global archive's diversity every `--every` generations and
+        // after the last one: all its behavior elites, the 100 fastest, and
+        // those within 1% of the best.
         if (generation + 1 - first_generation).is_multiple_of(options.every)
             || generation + 1 == first_generation + options.generations
         {
@@ -450,9 +499,12 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             mean(|g| g.node_count),
             mean(|g| g.muscle_count)
         );
-        // The lanes each ring creature takes on the GPU (`kernel::class_of`):
-        // the mean is the cost of a creature in lanes, so a body that grows
-        // past 8 or 16 nodes doubles its share of the GPU.
+        // The kernel class of each ring creature (`kernel::class_of`). The
+        // kernel has one class now, a thread per creature. So the first share
+        // is every body it can run, the last share is every body it cannot,
+        // the middle two shares stay 0, and the mean is `MAX_NODES` times the
+        // first share. The line keeps its four share columns from the time
+        // the kernel had four lane classes.
         let mut lanes = [0usize; 4];
         for g in &genomes {
             let class = evolution_simulator::kernel::class_of(g.node_count, g.muscle_count)
@@ -479,6 +531,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             lanes[3] as f64 / total,
         );
         let rungs = experiment.rungs.last();
+        // The screen bar of the last absorbed block and the share of its
+        // results at or above it.
         eprintln!(
             "search_ab: seed {seed} generation {generation} last screen {:?}",
             experiment.last_screen
@@ -487,6 +541,11 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             "search_ab: seed {seed} generation {generation} ended at {:.1} s",
             seed_started.elapsed().as_secs_f64()
         );
+        // What the audit lane and the early rungs did in this generation
+        // (`rungs::Report`): steps per creature, the creatures R1, R2 and the
+        // 5 s screen stopped, audit rows, which rungs are armed, the misses of
+        // the rules on the audit rows, and the share of the final top 1% and
+        // top 10% that the ladder and the 5 s screen alone would keep.
         println!(
             "{scope} {seed} {generation} rungs steps {:.1} stops {} {} {} of {} audit {} armed {}{} parent_skipped {} {} pass_misses {} {} misses {:.1} {:.1} extra_misses {:.1} {:.1} top1 {:.1} top10 {:.1} screen_top1 {:.1} screen_top10 {:.1}",
             rungs.steps_per_creature(),
@@ -558,6 +617,9 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         &experiment,
         gpu.sched.as_mut().expect("scheduler"),
     )?;
+    // The scheduler counts this seed's confirmation trials. The divisor is the
+    // generation count times the population as asked for, so a run that
+    // `--seconds` cut short reads low.
     if let Some(sched) = gpu.sched.as_ref() {
         println!(
             "{scope} seed {seed} confirmations: {} trials, per evaluated creature {:.5}",
@@ -568,6 +630,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     }
     print_common_grid(scope, seed, &experiment);
     print_island_diversity(scope, seed, &experiment);
+    // One diversity line per island, with the size of its morphology reserve.
     for (k, island) in experiment
         .islands
         .iter()
@@ -581,6 +644,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         );
     }
     print_islands(scope, seed, &experiment, &hub_best, options.generations);
+    // The emitters' shares of breeding at the end of the run.
     let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
     println!(
         "{scope} seed {seed} emitter shares: {}",
@@ -593,14 +657,17 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     Ok((best, qd))
 }
 
-/// The nurseries after a generation: the bodies and distinct body plans of
-/// every nursery of reshaped bodies, the distinct plans of all archives
-/// (islands, nurseries of new bodies, nurseries of reshaped bodies), and,
-/// when a graduation has just happened, what each island took of the two
-/// nurseries.
+/// Prints the nursery lines after a generation: the elites held by the
+/// nurseries of reshaped bodies, the distinct body plans of the islands and of
+/// all archives, and the island cells that nursery graduates hold. Then it
+/// prints the CMA emitters per archive and each island's QD score. After a
+/// generation boundary that graduated the nurseries it also prints how many
+/// bodies each island kept of the two nurseries. It prints nothing until the
+/// island archives exist.
 fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experiment) {
     use evolution_simulator::{qd, storage};
     use std::collections::HashSet;
+    // Distinct body plans among the behavior elites of `archives`.
     let plans = |archives: &[&qd::QdArchive]| -> usize {
         archives
             .iter()
@@ -620,7 +687,8 @@ fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experim
         .map(|i| &experiment.islands[storage::reshaped_of(i)])
         .collect();
     let bodies: usize = reshaped.iter().map(|a| a.behavior_count()).sum();
-    // The cells of the islands that nursery graduates hold.
+    // The island cells whose elite satisfies `keep`. A graduate grew up in a
+    // nursery, or descends from an elite that did.
     let cells = |keep: fn(&qd::Elite) -> bool| -> usize {
         mature
             .iter()
@@ -672,9 +740,12 @@ fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experim
     }
 }
 
-/// How much of their archive distance the 50 best global elites keep at four
-/// times the rate and solver passes (full trial, no screen) from a slightly
-/// perturbed pose that no run used.
+/// Prints how much of its archive distance each of the `TOP_BODIES` fastest
+/// global elites keeps when it runs again from a nudged start pose
+/// (`perturb`) at four times the rate and solver passes, with no screen. The
+/// line gives the median share kept and how many elites keep less than half.
+/// The other settings of the trial are the experiment's, early rungs
+/// included.
 fn print_robustness(
     scope: &str,
     seed: u64,
@@ -695,13 +766,16 @@ fn print_robustness(
     let mut unit = Population::default();
     for elite in &elites {
         let mut creature = elite.creature.unpack();
-        // A second pose from the same rule: the id seeds the perturbation.
+        // The id seeds the nudge. The XOR gives another pose than the bare id
+        // would. The id is restored after.
         creature.id ^= 0x9e37_79b9;
         perturb(&mut creature);
         creature.id ^= 0x9e37_79b9;
         unit.push(creature);
     }
     let standard = physics::Fidelity::standard();
+    // TODO: also set `rungs: None`. An elite re-test runs a full trial, and an
+    // armed rung of the experiment can stop this one early.
     let cfg = Config {
         fidelity: Some(physics::Fidelity {
             rate: standard.rate * 4,
@@ -728,10 +802,12 @@ fn print_robustness(
     Ok(())
 }
 
-/// QD score of the global archive's behavior elites re-binned on one fixed
-/// grid (the archive shape before any experiment: contact 6, cadence 8,
-/// height 6, feet 5), so runs whose archives have different shapes compare on
-/// the same ground. Also the reserve size and the distinct body plans held.
+/// Prints the QD score of the global archive's behavior elites re-binned on
+/// the movement grid alone (contact 6, cadence 8, height 6, feet 5, the cells
+/// of `qd` without the body classes), so runs whose archives have other
+/// layouts compare on the same ground. It also prints the size of the islands'
+/// morphology reserves added together and the distinct body plans in the
+/// global archive, its reserve included.
 fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     let mut cells: HashMap<[u8; 4], f32> = HashMap::new();
     let mut plans = std::collections::HashSet::new();
@@ -741,9 +817,13 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
             continue;
         }
         let d = &elite.descriptor;
+        // A copy of `qd`'s movement binning, which `qd` keeps private. It
+        // stays fixed when the archive's grid changes.
         let bin = |v: f32, high: f32, n: f32| {
             ((v.clamp(0.0, high) / high * n).floor().min(n - 1.0)) as u8
         };
+        // Mean height on a log scale from `low` to the tallest body the bone
+        // limit allows, as `qd` scales it.
         let low = 0.15f32;
         let top = (0.6 * evolution_simulator::evolution::max_bone_length()).max(2.0 * low);
         let height = ((d.mean_height.max(low) / low).ln() / (top / low).ln()).clamp(0.0, 1.0);
@@ -770,8 +850,10 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     );
 }
 
-/// Each island's best distance and QD score, and when the global best
-/// first came from the hub (was born in a hub slot).
+/// Prints each island's best distance and QD score. Then it prints when the
+/// global best elite came from the hub, meaning it was born in a hub slot: the
+/// first such generation and how many there were out of `generations`.
+/// `hub_best` lists them.
 fn print_islands(
     scope: &str,
     seed: u64,
@@ -807,17 +889,18 @@ fn print_islands(
 /// Top elites per island for the diversity report.
 const ISLAND_TOP: usize = 20;
 
-/// How much the islands' best elites have in common. For each island's
-/// fastest `ISLAND_TOP` behavior elites: how many distinct body plans they
-/// hold, the share whose body plan is also among another island's top
+/// Prints how much the islands' best elites have in common. For each island's
+/// fastest `ISLAND_TOP` behavior elites it gives how many distinct body plans
+/// they hold, the share whose body plan is also among another island's top
 /// elites, the share that is the same creature (a migrant copy), and the
 /// share whose oldest recorded ancestor is also an oldest ancestor of
-/// another island's top elites (common descent). The hub, when there is
-/// one, is compared with the others but left out of the means, because it
-/// holds copies of the other islands' elites by design.
+/// another island's top elites (common descent). Another island is any
+/// island but the hub, the wild islands included. The hub gets a row but
+/// stays out of the means, because it holds copies of the other islands'
+/// elites by design. The means cover the islands that hold elites.
 fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     use std::collections::HashSet;
-    let hub: Option<usize> = Some(evolution_simulator::storage::hub_island());
+    let hub = evolution_simulator::storage::hub_island();
     let tops: Vec<Vec<&evolution_simulator::qd::Elite>> = experiment
         .islands
         .iter()
@@ -833,7 +916,9 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
             elites
         })
         .collect();
-    // By the ids that key the records: a pruned record's creature has id 0.
+    // The oldest recorded ancestor. The lineage is walked by the ids that key
+    // its records, not by the records' `creature.id`, because a pruned
+    // record's creature has id 0.
     let root = |id: u64| {
         experiment
             .ancestry_ids(id, usize::MAX)
@@ -860,10 +945,8 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
         if top.is_empty() {
             continue;
         }
-        // Compare with the other isolated islands (all islands without a hub).
-        let others: Vec<usize> = (0..tops.len())
-            .filter(|&o| o != k && Some(o) != hub)
-            .collect();
+        // Compare with every other island but the hub.
+        let others: Vec<usize> = (0..tops.len()).filter(|&o| o != k && o != hub).collect();
         let share = |hit: &dyn Fn(&evolution_simulator::qd::Elite) -> bool| {
             top.iter().filter(|e| hit(e)).count() as f64 / top.len() as f64
         };
@@ -875,13 +958,13 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
         });
         rows.push(format!(
             "{}{k}: plans {} shared {:.2} copies {:.2} kin {:.2}",
-            if Some(k) == hub { "hub " } else { "" },
+            if k == hub { "hub " } else { "" },
             plans[k].len(),
             shared,
             copies,
             kin
         ));
-        if Some(k) != hub {
+        if k != hub {
             plan_sum += plans[k].len() as f64;
             shared_sum += shared;
             copy_sum += copies;
@@ -900,15 +983,22 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     );
 }
 
+/// The size of one elite's body. The lengths are measured as `size_report`
+/// measures them.
 struct BodySize {
     nodes: usize,
     muscles: usize,
+    /// Sum of the rest lengths of all bones, in m.
     length: f32,
+    /// Rest length of the longest bone, in m.
     longest_bone: f32,
+    /// Mass of the nodes with the bones' and organs' masses included, in kg.
+    /// The muscles' masses are left out.
     mass: f32,
 }
 
-/// The `count` fastest elites of the global archive.
+/// The sizes of the `count` fastest elites of the global archive, fastest
+/// first.
 fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
     let mut elites: Vec<_> = experiment
         .archive
@@ -922,6 +1012,8 @@ fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
         .into_iter()
         .map(|elite| {
             let creature = &elite.creature.unpack();
+            // TODO: `physics::nodes(creature)` also counts the muscles'
+            // masses, as `size_report` and the simulation do.
             let mass: f32 = physics::body(&creature.nodes, &creature.bones)
                 .iter()
                 .map(|node| node.mass)
@@ -943,6 +1035,9 @@ fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
         .collect()
 }
 
+/// Prints the node counts of `bodies` as `nodes`x`bodies` pairs, their median
+/// length and mass, their longest bone, and their mean and largest muscle
+/// count.
 fn print_body_mix(scope: &str, seed: u64, bodies: &[BodySize]) {
     if bodies.is_empty() {
         println!("{scope} seed {seed} top-{TOP_BODIES}: no scored creatures");
@@ -978,6 +1073,9 @@ fn print_body_mix(scope: &str, seed: u64, bodies: &[BodySize]) {
     );
 }
 
+/// Prints the mean and median of the seeds' best distances and of their QD
+/// scores. Values that are not finite, such as the best distance of a seed
+/// whose archive stayed empty, are dropped first.
 fn paired_summary(distances: &mut Vec<f32>, scores: &mut Vec<f32>) {
     let seeds = distances.len();
     distances.retain(|distance| distance.is_finite());
@@ -999,13 +1097,16 @@ fn mean(values: &[f32]) -> f32 {
     values.iter().sum::<f32>() / values.len() as f32
 }
 
-/// Upper middle entry of the sorted values, like `size_report`.
+/// Sorts `values` and returns the upper middle entry, like `size_report`.
+/// `values` must not be empty.
 fn median(values: &mut [f32]) -> f32 {
     values.sort_by(f32::total_cmp);
     values[values.len() / 2]
 }
 
-/// Small deterministic change to a creature's starting pose and grip.
+/// Nudges a creature's start pose and grip by small amounts drawn from a
+/// stream keyed by its id. Each node moves up to 0.02 m in x either way and 0
+/// to 0.02 m in y, and its friction scales by 0.9 to 1.1 and stays in 0 to 1.
 fn perturb(creature: &mut evolution_simulator::evolution::Creature) {
     let mut rng = evolution_simulator::evolution::Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
     for node in &mut creature.nodes {
