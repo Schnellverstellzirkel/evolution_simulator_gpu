@@ -286,7 +286,9 @@ pub fn apply_style(ctx: &egui::Context) {
     ctx.set_global_style(style);
 }
 
-/// A cheap deterministic value in [0, 1) for a small integer.
+/// A cheap deterministic hash of `n`, as a value in [0, 1). The world effects
+/// in `world_fx.rs` use it to scatter their shapes, and the film grain uses it
+/// to build and move its pattern.
 pub fn hash(n: i64) -> f32 {
     let mut x = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 29;
@@ -295,8 +297,10 @@ pub fn hash(n: i64) -> f32 {
     (x & 0xFFFF) as f32 / 65536.0
 }
 
-/// A textured quad: `art` tiled so one repeat covers `tile` points, shifted
-/// by `offset` repeats, tinted by `tint` (premultiplied).
+/// Paints `art`, an image that tiles, over `rect` as one textured quad. One
+/// repeat covers `tile` points, `offset` shifts the pattern by that many
+/// repeats, and `tint` (premultiplied) tints it. An empty `rect` paints
+/// nothing.
 pub fn tiled(
     painter: &egui::Painter,
     rect: Rect,
@@ -315,8 +319,8 @@ pub fn tiled(
     painter.image(art.texture(painter.ctx()), rect, uv, tint);
 }
 
-/// The paper behind the whole window: warm tan with a sunburst of paler
-/// rays, like the poster. It covers `rect`.
+/// Paints the paper behind the whole window over `rect`: poster tan with 14
+/// paler rays that fan out from a point above the middle, like a sunburst.
 pub fn backdrop(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, 0, poster::PAPER);
     let center = Pos2::new(rect.center().x, rect.top() + rect.height() * 0.35);
@@ -337,11 +341,13 @@ pub fn backdrop(painter: &egui::Painter, rect: Rect) {
     }
 }
 
-/// Kept for the plates: nothing to add over the flat panels.
+/// Does nothing. The flat poster panels have no wear to paint. The side panel
+/// in `ui.rs` still calls it, and every argument is unused.
 pub fn wear(_painter: &egui::Painter, _rect: Rect, _theme: Theme, _seed: f32) {}
 
-/// A card: a soft drop shadow, the fill and a thick dark outline. `lit`
-/// draws the outline in brick red and thicker.
+/// Paints a card in `rect`: a translucent drop shadow offset down and to the
+/// right, the `fill` and a dark outline inside the rect. `lit` draws the
+/// outline in the accent color and thicker.
 pub fn plate(painter: &egui::Painter, rect: Rect, theme: Theme, fill: Color32, lit: bool) {
     painter.rect_filled(
         rect.translate(Vec2::new(3.0, 4.0)),
@@ -360,7 +366,8 @@ pub fn plate(painter: &egui::Painter, rect: Rect, theme: Theme, fill: Color32, l
     );
 }
 
-/// A HUD box over the scene: dark glass with rounded corners.
+/// Paints a HUD box over the scene: dark glass with rounded corners and a thin
+/// dark outline.
 pub fn hud_panel(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, 8, scene::HUD_BACK);
     painter.rect_stroke(
@@ -371,8 +378,9 @@ pub fn hud_panel(painter: &egui::Painter, rect: Rect) {
     );
 }
 
-/// Paints a galley with a soft glow around it, like the HUD numbers'
-/// blurred twin font. `strength` scales the glow.
+/// Paints `galley` at `at` in `color`, with a glow of 20 faint copies in two
+/// rings around it. `strength` scales the alpha of the glow, and 0 paints the
+/// text alone.
 fn glow_galley(
     painter: &egui::Painter,
     at: Pos2,
@@ -398,7 +406,8 @@ fn glow_galley(
     painter.galley_with_override_text_color(at, galley, color);
 }
 
-/// Text with a faint glow, like the numbers of a HUD. Returns its rect.
+/// Paints `text` in `font` and `color`, anchored at `pos` by `align`, with a
+/// faint glow when `glow` is true. Returns the rect of the text.
 pub fn glow_text(
     painter: &egui::Painter,
     pos: Pos2,
@@ -420,7 +429,9 @@ pub fn glow_text(
     rect
 }
 
-/// Letter-spaced capitals, the voice of every label on the HUD.
+/// Builds a layout job of `text` as bold capitals at `size` and `color`, with
+/// extra letter spacing of 8% of the size. Labels, titles and HUD captions use
+/// it.
 pub fn caps(text: &str, size: f32, color: Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.append(
@@ -436,7 +447,8 @@ pub fn caps(text: &str, size: f32, color: Color32) -> LayoutJob {
     job
 }
 
-/// Paints letter-spaced capitals and returns their rect.
+/// Paints `text` as the letter-spaced capitals of `caps`, anchored at `pos` by
+/// `align`. Returns the rect of the text.
 pub fn caps_text(
     painter: &egui::Painter,
     pos: Pos2,
@@ -452,16 +464,19 @@ pub fn caps_text(
 }
 
 /// A section title in the side panel: a full-width dark wood strip with a
-/// mustard block and cream capitals.
+/// mustard block and cream capitals. `_theme` is not used.
 pub fn section(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
     strip(ui, text, true)
 }
 
-/// The same strip as wide as its words, for a title beside other things.
+/// The same strip as `section`, only as wide as its text, so it can sit beside
+/// other things. `_theme` is not used.
 pub fn heading(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
     strip(ui, text, false)
 }
 
+/// The dark wood strip that `section` and `heading` draw. With `full` it is as
+/// wide as the available space, and otherwise it is as wide as its text.
 fn strip(ui: &mut egui::Ui, text: &str, full: bool) -> Response {
     let galley = ui.painter().layout_job(caps(text, 15.0, poster::CREAM));
     let width = if full {
@@ -494,8 +509,10 @@ fn strip(ui: &mut egui::Ui, text: &str, full: bool) -> Response {
     response
 }
 
-/// One tab of the tab strip: a chunky poster tab with a key cap showing
-/// its shortcut. The open one is mustard, the others cream.
+/// One tab of the tab strip. A small dark square on its left shows the
+/// shortcut `key`, and `text` follows it. The selected tab is mustard with a
+/// shadow and a thicker outline, a hovered one is pale mustard, and the others
+/// are cream. Returns the response, which reports clicks.
 pub fn tab(ui: &mut egui::Ui, selected: bool, key: &str, text: &str, theme: Theme) -> Response {
     let font = FontId::new(21.0, assets::hud_bold());
     let galley = ui
