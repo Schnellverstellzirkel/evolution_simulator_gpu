@@ -1,17 +1,39 @@
+//! `Config` holds the settings of an experiment: the population and seed, the
+//! trial length, the physics of the world, the limits on bodies, the memory
+//! budgets and the autosave interval. `validate` checks every range. The
+//! environment effects (`environment`) change its world fields, and the kernel
+//! packing (`kernel`) reads them to set up each trial. A binary save and a JSON
+//! preset (`--config`) each go through a private struct that leaves out the
+//! runtime-only fields.
+
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// The settings of an experiment. `fidelity`, `screen` and `rungs` are runtime
+/// only: no save or preset holds them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
+    /// Creatures in a generation. An experiment keeps the count it starts with.
     pub population: usize,
+    /// Seed of the search's random streams.
     pub seed: u64,
+    /// Whether a new game takes its seed from the clock (`resolved`).
     pub random_seed: bool,
+    /// Length of a trial (s).
     pub duration: f32,
+    /// Multiplier on the size of the random changes to a child's genes, in
+    /// breeding and in the CMA samples. 1.0 is the normal strength.
     pub mutation: f32,
+    /// Downward acceleration (m/s²), set by the Gravity effect.
     pub gravity: f32,
     /// Velocity retained per 1/60 second, independent of physics timestep.
     pub air_retention: f32,
+    /// Multiplier on every node's friction coefficient where it meets the
+    /// ground, set by the Grip effect. The calm world is 1.5.
     pub ground_friction: f32,
+    /// Whether the world has a ground. Without one, the effects that act on
+    /// the ground are off: roughness, slope, mud, gaps, hurdles, quake, ice
+    /// patches and brambles.
     pub ground: bool,
     /// Ground roughness level (0 = flat), set by the environment effects.
     pub terrain: u8,
@@ -52,8 +74,8 @@ pub struct Config {
     /// from its id, so a gait cannot memorize one bump pattern.
     pub quake: f32,
     /// Autochange level: 0 off, 1 slow, 2 normal, 3 fast. When on, the world
-    /// advances one step of the `environment::autochange_ladder` every 20, 10,
-    /// or 5 generations.
+    /// advances one step of the `environment::autochange_ladder` every 100, 50
+    /// or 20 generations (`environment::AUTOCHANGE_INTERVALS`).
     pub autochange: u8,
     /// Autochange ladder steps applied so far. Saved in checkpoints, so a
     /// resumed game continues mid-cycle at the same step.
@@ -66,11 +88,20 @@ pub struct Config {
     pub min_friction: f32,
     /// Maximum node friction coefficient.
     pub max_friction: f32,
+    /// Most nodes in a body, from 3 up to `evolution::MAX_NODES`.
     pub max_nodes: usize,
+    /// Most muscles in a body, from `max_nodes` up to `evolution::MAX_MUSCLES`.
     pub max_muscles: usize,
+    /// GPU memory (MiB) that `batch_size` sizes a batch against.
     pub gpu_budget_mib: usize,
+    /// Host memory (MiB) for the population. `validate` checks the population
+    /// against it at 1,200 bytes a creature.
     pub ram_budget_mib: usize,
+    /// Throughput mode (large batches) against responsive mode (small ones).
+    /// Only `batch_size` reads it. The game sizes its blocks from
+    /// `storage::RingShape`.
     pub throughput: bool,
+    /// Generations between autosaves. 0 turns autosave off.
     pub checkpoint_interval: u32,
     /// Physics resolution for evaluations under this config; `None` is
     /// `Fidelity::standard()`. Runtime only, never saved.
@@ -82,6 +113,8 @@ pub struct Config {
     /// each generation; `None` runs no rung. Runtime only, never saved.
     pub rungs: Option<crate::rungs::Rungs>,
 }
+
+/// The game's normal settings: 3M creatures, 20 s trials and the calm world.
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -118,9 +151,8 @@ impl Default for Config {
             gpu_budget_mib: 4096,
             ram_budget_mib: 16384,
             throughput: true,
-            // The game writes no files on its own (owner, 2026-09-28): a 3M
-            // autosave took 1.4 GB at generation 9 and 4.2 GB at generation 70,
-            // and the snapshot doubled the population in memory.
+            // The game writes no files on its own (owner, 2026-09-28). The
+            // File menu turns autosave on.
             checkpoint_interval: 0,
             fidelity: None,
             screen: None,
@@ -129,6 +161,9 @@ impl Default for Config {
     }
 }
 
+/// `Config` as a text format such as JSON writes it, without the runtime-only
+/// fields. A missing field takes its value from `Config::default()`, so a
+/// preset lists only the settings it changes.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct HumanConfig {
@@ -291,6 +326,10 @@ impl From<&Config> for HumanConfig {
     }
 }
 
+/// `Config` as a binary format writes it, without the runtime-only fields. The
+/// settings in a save and in each of its history rows use it. A binary format
+/// has no field names, so the order of these fields is the layout in the file,
+/// and no field may be missing.
 #[derive(Serialize, Deserialize)]
 struct BinaryConfig {
     population: usize,
@@ -411,6 +450,7 @@ impl From<BinaryConfig> for Config {
     }
 }
 
+/// A text format gets `HumanConfig` and a binary format gets `BinaryConfig`.
 impl Serialize for Config {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -424,6 +464,8 @@ impl Serialize for Config {
     }
 }
 
+/// A text format reads `HumanConfig` and a binary format reads `BinaryConfig`.
+/// `fidelity`, `screen` and `rungs` come back as `None`.
 impl<'de> Deserialize<'de> for Config {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -438,6 +480,8 @@ impl<'de> Deserialize<'de> for Config {
 }
 
 impl Config {
+    /// Checks the settings against their ranges. The first one out of range
+    /// gives an error, and the player sees its message.
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (2..=20_000_000).contains(&self.population) && self.population.is_multiple_of(2),
@@ -554,8 +598,11 @@ impl Config {
         Ok(())
     }
     /// Whether the two settings describe different physics for a fixed
-    /// creature's trial. Runtime-only fields (`fidelity`, `screen`) and
-    /// creation-only settings (body limits, mutation) are not part of it.
+    /// creature's trial. It compares the trial length and the world's physics.
+    /// It leaves out the runtime-only fields (`fidelity`, `screen`, `rungs`),
+    /// the creation-only settings (body limits, node sizes and friction,
+    /// mutation) and the run settings (population, seed, autochange,
+    /// throughput, budgets, autosave).
     pub fn physics_differs(&self, other: &Config) -> bool {
         self.duration != other.duration
             || self.gravity != other.gravity
@@ -575,7 +622,8 @@ impl Config {
             || self.hurdles != other.hurdles
             || self.quake != other.quake
     }
-    /// This config's physics resolution.
+    /// This config's physics resolution: `fidelity`, or `Fidelity::standard()`
+    /// when that is `None`.
     pub fn fidelity(&self) -> crate::physics::Fidelity {
         self.fidelity
             .unwrap_or_else(crate::physics::Fidelity::standard)
@@ -584,21 +632,27 @@ impl Config {
     pub fn steps(&self) -> u32 {
         (self.duration * self.fidelity().rate as f32).round() as u32
     }
+    /// Creatures per batch for the `EvalBench` command of `main.rs`, the only
+    /// caller. It is 100,000 in throughput mode and 8,192 in responsive mode,
+    /// lowered so that four times a rough estimate of the batch's bytes fits in
+    /// `gpu_budget_mib`. It is at least 1.
     pub fn batch_size(&self) -> usize {
         // Fewer readback fences keep the GPU busier. Responsive mode still stays
         // small enough that pausing and editing settings never feels delayed.
         let maximum = if self.throughput { 100_000 } else { 8192 };
         // Leave space for power-of-two buffer growth and staging resources.
         let padded_nodes = self.max_nodes.next_power_of_two().max(8);
-        // A muscle genome is stored once, with up to four u32 node references;
-        // each padded node also owns its state and a NodeAdj range.
+        // A rough size of one creature in bytes. The sizes come from the
+        // buffers of the earlier GPU kernels and only approximate the CUDA
+        // records.
         let bytes_per_creature =
             padded_nodes * 40 + self.max_muscles * 72 + self.max_nodes * 12 + 80;
         maximum
             .min(self.gpu_budget_mib * 1024 * 1024 / (bytes_per_creature * 4))
             .max(1)
     }
-    /// With `random_seed`, the config with a seed from the clock.
+    /// This config with `seed` set from the clock (nanoseconds since the Unix
+    /// epoch) when `random_seed` is on, and unchanged when it is off.
     pub fn resolved(mut self) -> Self {
         if self.random_seed {
             self.seed = std::time::SystemTime::now()
