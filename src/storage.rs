@@ -1,3 +1,11 @@
+//! The `Experiment` is the search state of the game: the global archive, the
+//! island archives with their nurseries (`qd::QdArchive`), the history of
+//! generations and the ring of blocks in flight. `ring` carries each block to
+//! the GPUs and back. `Experiment::absorb` then offers the scored creatures to
+//! the archives and breeds the block again. The submodules hold the parts:
+//! archiving, breeding, record confirmations, islands, lineage, the ring shape,
+//! world changes, saves and the generation dump.
+
 use crate::{
     config::Config,
     evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng, StoredCreature},
@@ -17,7 +25,7 @@ use std::{
     sync::Arc,
 };
 
-/// A hash of keys that are spread out or counted up already (creature ids,
+/// A hasher for keys that are spread out or counted up already (creature ids,
 /// plan keys): one rotate and one multiply (FxHash), far cheaper than the
 /// default SipHash. Only for maps and sets whose iteration order never
 /// decides a result (the default hash's order changes with every run
@@ -74,43 +82,71 @@ pub use save_format::{
 };
 pub use world::{Refuge, Reseed};
 
+/// The percentiles of `Stats::percentiles`, over the fastest elite of each
+/// way of moving. 0 is the slowest and 100 the fastest.
 pub const PERCENTILES: [f32; 29] = [
     0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 20., 30., 40., 50., 60., 70., 80., 90., 91., 92.,
     93., 94., 95., 96., 97., 98., 99., 100.,
 ];
+/// One row of the history, written when a generation ends: the distances of
+/// the global archive, the settings the generation ran with and how long it
+/// took. Distances are in meters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stats {
+    /// The generation the row describes.
     pub generation: u32,
+    /// The best distance in the global archive.
     pub best: f32,
+    /// The median distance over the fastest elite of each way of moving.
     pub median: f32,
+    /// The lowest distance over those elites.
     pub worst: f32,
+    /// The mean distance over those elites.
     pub mean: f32,
+    /// Trials that failed in the generation.
     pub failed: usize,
+    /// How long the generation took, in seconds
+    /// (`Experiment::evaluation_seconds`).
     pub seconds: f64,
+    /// Evaluations in the generation.
     pub population: usize,
+    /// The distances at `PERCENTILES`, over the same elites as `median`. The
+    /// last one is `best`.
     pub percentiles: Vec<f32>,
-    /// Sparse centimeter bins preserve adjustable historical histograms without storing all scores.
+    /// Sparse bins of one centimeter: the bin and how many of the elites
+    /// counted in `archive_cells` are in it. A chart can draw any bar width
+    /// from them without the scores.
     pub histogram: Vec<(i32, u32)>,
+    /// The body types of the same elites: nodes, muscles and the number of
+    /// elites with that body.
     pub species: Vec<(usize, usize, u32)>,
+    /// The slowest, the median and the fastest elite of the global archive,
+    /// in this order.
     pub representatives: Vec<Creature>,
+    /// The settings the generation ran with.
     pub config: Config,
+    /// The elites in the global archive's cells, without its morphology
+    /// reserve. The histogram and the body types count these.
     #[serde(default)]
     pub archive_cells: usize,
+    /// The global archive's QD score: the sum of the distances of those elites.
     #[serde(default)]
     pub qd_score: f64,
     /// The share of the ways of moving (cells without their body classes)
     /// that an elite covers: `Stats::moves` counts them.
     #[serde(default)]
     pub archive_coverage: f32,
+    /// The statistics of each emitter when the generation ended.
     #[serde(default)]
     pub emitters: [EmitterStats; qd::EMITTER_COUNT],
     /// The ring the generation ran with.
     pub ring: RingShape,
-    /// Body plans among the global archive's elites, and their effective
-    /// number of clades (Hill number of order 1: exp of the Shannon entropy
-    /// of clade sizes; Hill 1973, Jost 2006).
+    /// Body plans among the elites counted in `archive_cells`.
     #[serde(default)]
     pub plans: usize,
+    /// The effective number of clades among those elites: the Hill number of
+    /// order 1, which is the exponential of the Shannon entropy of the clade
+    /// sizes (Hill 1973, Jost 2006).
     #[serde(default)]
     pub clades: f32,
     /// The median age, in generations, of the global archive's body plans:
