@@ -474,14 +474,14 @@ fn reject_other_formats(path: &Path, magic: &[u8; 8]) -> Result<()> {
 /// The header of a save the game can load now, or a message saying why not.
 pub fn check(path: &Path) -> Result<SaveHeader> {
     let header = peek(path)?;
-    ensure_current_version(path, &header)?;
+    ensure_loadable(path, &header)?;
     Ok(header)
 }
 
 /// Fails with a message unless the game can load the header's physics version
 /// (`qd::loadable`): the current one, or an older one back to
 /// `qd::OLDEST_LOADABLE`.
-fn ensure_current_version(path: &Path, header: &SaveHeader) -> Result<()> {
+fn ensure_loadable(path: &Path, header: &SaveHeader) -> Result<()> {
     ensure!(
         qd::loadable(header.qd_version),
         "{} was saved under physics version {}, and this game uses version {}. Its scores no longer hold, so it cannot be loaded; start a new population instead.",
@@ -692,7 +692,7 @@ fn load_from(
         .with_context(|| format!("{} is cut short", path.display()))?;
     let saved_version = SaveHeader::from_bytes(header).qd_version;
     if !any_version {
-        ensure_current_version(path, &SaveHeader::from_bytes(header))?;
+        ensure_loadable(path, &SaveHeader::from_bytes(header))?;
     }
     // `bincode` reads field by field; a buffer turns each read into a copy
     // instead of a call into the decompressor (18 s to 5 s at 3M).
@@ -769,11 +769,11 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
 }
 
 #[cfg(test)]
-mod peek_tests {
+mod summary_tests {
     use super::*;
 
     #[test]
-    fn peek_reads_the_generation_and_world_of_a_save() {
+    fn summary_reads_the_generation_and_world_of_a_save() {
         let config = Config {
             population: 64,
             random_seed: false,
@@ -796,7 +796,7 @@ mod peek_tests {
     }
 }
 #[cfg(test)]
-mod migration_tests {
+mod save_tests {
     use super::*;
 
     /// Deterministic made-up results: a distance and a behavior from each
