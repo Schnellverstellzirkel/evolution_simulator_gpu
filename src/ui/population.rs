@@ -533,7 +533,8 @@ fn map_best_cells(
 }
 /// The map's grid lines, their labels and the two axis titles. Ground contact
 /// runs from 0 to 100% along the bottom and stride rate from 0 to 6 strides a
-/// second up the side, the ranges `qd` bins.
+/// second up the side. These are the ranges that `qd::Descriptor::niche_in`
+/// divides into bins.
 fn paint_map_axes(painter: &egui::Painter, rect: Rect, plot: Rect, theme: Theme) {
     let (columns, rows, column_width, row_height) = map_grid(plot);
     for column in 0..=columns {
@@ -742,6 +743,9 @@ fn paint_card(
             theme.cold,
         );
     }
+    // A card with no score of its own shows its parent's, or says its trial is
+    // pending. The archive list leaves the parent score NaN and the survivor
+    // mark off, so its cards show their own distance or "Failed trial".
     let (label, score_color) = if !card.score.is_finite() {
         if card.parent_score.is_finite() && card.parent_score > FAILED {
             (format!("Parent {:.3} m", card.parent_score), theme.muted)
