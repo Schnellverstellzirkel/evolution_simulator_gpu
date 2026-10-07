@@ -1,11 +1,11 @@
-//! A second set of operators, after the audit in docs/anatomy-operators.md:
-//! muscle and rhythm changes kept most of a parent's gait, skeletal ones a
-//! few percent. These copy programs between limbs of the same shape, trade
-//! the body clock against stroke length, change leverage or strength as a
-//! whole, duplicate or grow limbs so the gait survives, and remove the parts
-//! that do the least.
+//! The 14 operators here (`docs/anatomy-operators.md` lists them by group)
+//! copy or swap programs between limbs of the same shape, trade the body
+//! clock against stroke length, change a muscle's leverage or a limb's
+//! strength, twin, grow and merge limbs, remove the parts that do the least,
+//! and give the end of the body that drags a leg or a lift. Eight gentle ones
+//! share one pick slot (`SHARED_SLOT` in `mod.rs`).
 //!
-//! Operators here that add or remove bones close the motor ring themselves
+//! The operators that add or remove bones close the motor ring themselves
 //! with passive muscles (`passive_ring`). Left to `repair`, the ring
 //! would get new random muscles that drive from the first step.
 use super::limbs::{clamped, fuse_pair, limb_roots, pick};
@@ -67,9 +67,10 @@ pub(crate) fn swap_limb_programs(
 }
 
 /// Copies a muscle that one limb has and its same-shaped partner lacks onto
-/// the partner's matching bones, stroke fitted to the new span, and timed to
-/// the partner's program (the phase offset of the first pair of matching
-/// muscles, or half a cycle without one).
+/// the partner's matching bones. The copy has no tendon and its stroke is
+/// fitted to the new span. Its phase and touchdown reset move by the offset
+/// between the first pair of matching muscles of the two limbs, or by half a
+/// cycle when there is no such pair.
 pub(crate) fn copy_muscle_to_partner(
     c: &mut Creature,
     cfg: &Config,
@@ -79,8 +80,8 @@ pub(crate) fn copy_muscle_to_partner(
     if !room(c, cfg, 0, 1) {
         return false;
     }
-    // (source muscle, partner pair, phase offset)
     let partners = partners(c);
+    // Each option is (source muscle, index of the partner pair, phase offset).
     let options = |push: &mut dyn FnMut((usize, usize, f32))| {
         for k in 0..partners.len() {
             let (from, to) = partners.get(k);
@@ -138,10 +139,12 @@ pub(crate) fn twin_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     true
 }
 
-/// Grows the same actuated tip on both limbs of a same-shaped pair: a short
-/// bone (the same share of each tip bone), turned the same way (mirrored when
-/// the limbs point to opposite sides), with the same narrow joint range and a
-/// muscle to the tip bone timed like a muscle of its own limb.
+/// Grows the same actuated tip on both limbs of a same-shaped pair. Each new
+/// bone is the same share (0.25 to 0.5) of its tip bone. It turns away from
+/// that bone by the same angle and gets the same narrow joint range, both
+/// mirrored on the second limb when the limbs point to opposite sides. A muscle
+/// runs from each new bone to its tip bone with the rhythm of the first muscle
+/// on that tip bone, or a random one if the tip bone has none.
 pub(crate) fn grow_matching_tips(
     c: &mut Creature,
     cfg: &Config,
@@ -219,10 +222,11 @@ pub(crate) fn nudge_limb_phase(
     true
 }
 
-/// Scales the body clock's period and every muscle's stroke by one factor
-/// (0.7 to 1.4), each muscle keeping its relaxed length. A muscle's drive
-/// follows the speed of its target length, which stays the same: quicker,
-/// shorter strokes or slower, longer ones with the same force.
+/// Scales the body clock (the period of every muscle, so the limb clock
+/// ratios stay) and every muscle's stroke by one factor (0.7 to 1.4), each
+/// muscle keeping its relaxed length (`long`). A muscle's drive follows the
+/// speed of its target length, which stays the same: quicker, shorter strokes
+/// or slower, longer ones with the same force.
 pub(crate) fn cadence_stride_trade(
     c: &mut Creature,
     _cfg: &Config,
@@ -290,8 +294,8 @@ pub(crate) fn scale_muscle_leverage(
 }
 
 /// Scales the stiffness of every active muscle with an end on a limb by one
-/// factor (0.6 to 1.6): the limb pushes harder or softer with the same
-/// timing and geometry.
+/// factor (0.6 to 1.6, keeping each stiffness within 1 to 120): the limb
+/// pushes harder or softer with the same timing and geometry.
 pub(crate) fn scale_limb_strength(
     c: &mut Creature,
     _cfg: &Config,
@@ -385,6 +389,8 @@ pub(crate) fn prune_idle_limb(
 /// Merges the last two bones of a limb (a joint with one bone below it that
 /// ends in a foot) into one bone from the upper joint to the foot, which
 /// stays where it was. Muscles on either bone keep their place on the body.
+/// The new bone must be at least 0.03 m long and no longer than the longest
+/// bone allowed, and the upper bone must not be the neck.
 pub(crate) fn merge_leaf_bones(
     c: &mut Creature,
     cfg: &Config,
@@ -524,8 +530,9 @@ struct DraggingEnd {
 
 /// The working leg (the leg, from `leaf_limbs`, whose muscles drive most)
 /// and the other end of the body: the leg whose foot lies farthest from the
-/// working leg's top joint along x in the rest pose, or without another leg
-/// the node farthest along x (not the head, not in the working leg).
+/// working leg's top joint along x in the starting pose, or without another
+/// leg the node farthest along x (not the head, not in the working leg).
+/// `None` when no leg drives or no node is left for a copy.
 fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
     let legs = leaf_limbs(c);
     let work = |leg: &BoneIds| -> f32 {
