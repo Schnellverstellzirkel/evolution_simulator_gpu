@@ -273,19 +273,28 @@ pub struct StoredCreature {
 }
 impl StoredCreature {
     pub fn new(creature: &Creature) -> Self {
+        Self::from_parts(
+            creature.id,
+            &creature.nodes,
+            &creature.bones,
+            &creature.muscles,
+        )
+    }
+    /// A body packed from its parts, as `new` packs a creature.
+    pub fn from_parts(id: u64, nodes: &[NodeGene], bones: &[Bone], muscles: &[Muscle]) -> Self {
         let mut genes: Vec<u32> = Vec::with_capacity(
-            (std::mem::size_of_val(&creature.nodes[..])
-                + std::mem::size_of_val(&creature.bones[..])
-                + std::mem::size_of_val(&creature.muscles[..]))
+            (std::mem::size_of_val(nodes)
+                + std::mem::size_of_val(bones)
+                + std::mem::size_of_val(muscles))
                 / 4,
         );
-        genes.extend_from_slice(bytemuck::cast_slice(&creature.nodes));
-        genes.extend_from_slice(bytemuck::cast_slice(&creature.bones));
-        genes.extend_from_slice(bytemuck::cast_slice(&creature.muscles));
+        genes.extend_from_slice(bytemuck::cast_slice(nodes));
+        genes.extend_from_slice(bytemuck::cast_slice(bones));
+        genes.extend_from_slice(bytemuck::cast_slice(muscles));
         Self {
-            id: creature.id,
-            node_n: creature.nodes.len() as u32,
-            bone_n: creature.bones.len() as u32,
+            id,
+            node_n: nodes.len() as u32,
+            bone_n: bones.len() as u32,
             genes: genes.into_boxed_slice(),
         }
     }
@@ -526,6 +535,17 @@ impl Genes {
     }
 }
 impl Population {
+    /// Creature `index` packed for an archive, without a whole `Creature`
+    /// (6.4 KB) on the way.
+    pub fn stored(&self, index: usize) -> StoredCreature {
+        let g = &self.genomes[index];
+        StoredCreature::from_parts(
+            g.id,
+            &self.nodes[g.node_start..g.node_start + g.node_count],
+            &self.bones[g.bone_start..g.bone_start + g.bone_count],
+            &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count],
+        )
+    }
     pub fn creature(&self, index: usize) -> Creature {
         let g = &self.genomes[index];
         Creature {

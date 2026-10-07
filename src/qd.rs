@@ -1500,7 +1500,7 @@ impl QdArchive {
             *elite = Elite {
                 niche,
                 descriptor,
-                creature: population.creature(index).into(),
+                creature: population.stored(index),
                 fitness,
                 emitter,
                 improved_generation: generation,
@@ -1532,7 +1532,7 @@ impl QdArchive {
         self.entries.push(Elite {
             niche: niche.clone(),
             descriptor,
-            creature: population.creature(index).into(),
+            creature: population.stored(index),
             fitness,
             emitter,
             improved_generation: generation,
@@ -1596,7 +1596,7 @@ impl QdArchive {
             self.entries[slot] = Elite {
                 niche,
                 descriptor,
-                creature: population.creature(index).into(),
+                creature: population.stored(index),
                 fitness,
                 emitter,
                 improved_generation: generation,
@@ -1644,7 +1644,7 @@ impl QdArchive {
         let elite = Elite {
             niche: niche.clone(),
             descriptor,
-            creature: population.creature(index).into(),
+            creature: population.stored(index),
             fitness,
             emitter,
             improved_generation: generation,
