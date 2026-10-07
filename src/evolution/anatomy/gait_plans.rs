@@ -1,20 +1,14 @@
-//! Gait operators: whole body plans: quadruped, hexapod, hopper, myriapod, and moves between them.
-//!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
-//!
-//! A body plan is a leg count, a leg spacing along the trunk and a timing
-//! among the legs, and the three have to change together or the gait breaks.
-//! Sims (1994) and Lipson and Pollack (2000) found walkers whose legs came in
-//! mirrored pairs on a regular spacing. Alexander's work on gait and duty
-//! factor gives the timings: a trot or a tripod gait moves diagonal legs
-//! together, a walk staggers the pairs, a bound moves a pair at once, and
-//! Full and Koditschek's templates say the same hopping or walking spring
-//! mass runs in every plan. A wave of phase down a row of legs is the pattern
-//! a central pattern generator gives a myriapod. Each operator below builds
-//! the legs and sets the timing in one move. A leg here is a leaf limb that
-//! reaches low (a walker), and walkers are ordered by the x of their hips,
-//! rear first.
+//! Gait operators for whole body plans, where a plan is a leg count, a leg
+//! spacing along the trunk and a timing among the legs, and the three have to
+//! change together or the gait breaks. Some operators build a named plan
+//! (quadruped, hexapod, myriapod, hopper, swinger, biped, counterweight
+//! runner), some add, shed, fuse or split legs, and two give legs the timing or
+//! the proportions of hoofed runners. The operators of this file share one pick
+//! slot (`GAIT_FILES` in `mod.rs`) and are compound, so a child gets no
+//! parameter noise after one. The ideas come from Sims (1994) and Lipson and
+//! Pollack (2000) on mirrored leg pairs, Alexander on gait timing and duty
+//! factor, and Full and Koditschek (1999) on the spring-mass template that runs
+//! under every plan.
 use super::compound::{close_ring, hinge_muscle, limb_phase, shed_tips, shift_group, strongest};
 use super::extra::limb_drive;
 use super::junctions::{add_node, keep_strokes, lift, shift_branch, spans, turn_branch};
@@ -28,7 +22,9 @@ use crate::config::Config;
 use crate::evolution::{Bone, Creature, JOINT_LIMIT, Muscle, Rng, max_bone_length};
 use std::f32::consts::PI;
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name, for `GAIT_FILES` in `mod.rs`. Add each new
+/// one here. Their order is part of the search, because a pick draws the n-th
+/// entry of the list.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("quadruped_plan", quadruped_plan),
     ("hexapod_tripod", hexapod_tripod),
@@ -50,8 +46,10 @@ fn hip_x(c: &Creature, limb: &[usize]) -> f32 {
     c.nodes[c.bones[limb[0]].a as usize].x
 }
 
-/// The legs that reach low (at most three bones, the tip in the lower part of
-/// the body), rear first.
+/// The legs of a plan, called walkers: the leaf limbs with at most three bones
+/// and a tip no more than 0.35 of the body's height plus 0.05 above the lowest
+/// tip. The list is ordered by the x of the hip and then of the foot, so the
+/// rearmost leg is first.
 fn walkers(c: &Creature) -> Limbs {
     let all = leaf_limbs(c);
     let tip_y = |l: &BoneIds| c.nodes[foot(c, l)].y;
@@ -69,7 +67,7 @@ fn walkers(c: &Creature) -> Limbs {
     out
 }
 
-/// Nodes in no leaf limb, the head excluded.
+/// The nodes in no leaf limb, the head excluded. The hip of a leg is one.
 fn trunk_nodes(c: &Creature) -> BoneIds {
     let inside: BoneIds = leaf_limbs(c)
         .iter()
@@ -78,8 +76,10 @@ fn trunk_nodes(c: &Creature) -> BoneIds {
     (1..c.nodes.len()).filter(|n| !inside.contains(n)).collect()
 }
 
-/// Moves the muscles of leg `i` (phase and touchdown reset together) so the
-/// leg's strongest muscle runs at `base + pattern(i)`.
+/// Moves the muscles of each leg of `legs` (phase and touchdown reset
+/// together) so that the strongest muscle of leg `i` runs at phase
+/// `base + pattern(i)`. A leg with no muscle is skipped, and a muscle on two
+/// legs belongs to the first.
 fn retime(c: &mut Creature, legs: &[BoneIds], base: f32, pattern: impl Fn(usize) -> f32) {
     let groups = muscle_groups(c, legs);
     for (i, group) in groups.iter().enumerate() {
@@ -91,13 +91,16 @@ fn retime(c: &mut Creature, legs: &[BoneIds], base: f32, pattern: impl Fn(usize)
     }
 }
 
-/// Legs in pairs along the body, diagonal pairs together: a trot for four
-/// legs, a tripod gait for six.
+/// The phase offset of leg `i`, rear first, in a gait of leg pairs. The two
+/// legs of a pair are half a cycle apart and the next pair has them swapped,
+/// so diagonal legs step together: a trot for four legs, a tripod gait for six.
 fn alternate(i: usize) -> f32 {
     0.5 * ((i / 2 + i % 2) % 2) as f32
 }
 
-/// Scales the leg that starts at the first bone of `limb` about its hip.
+/// Scales the leg `limb` about its hip by `factor`. Its nodes move and the rest
+/// length of each bone scales, within 0.03 and `max_bone_length()`. The caller
+/// lifts the body, clamps the nodes and keeps the strokes (`scale_legs`).
 fn scale_leg(c: &mut Creature, limb: &[usize], factor: f32) {
     let pivot = c.nodes[c.bones[limb[0]].a as usize];
     for n in branch_nodes(c, limb) {
@@ -111,7 +114,9 @@ fn scale_leg(c: &mut Creature, limb: &[usize], factor: f32) {
     }
 }
 
-/// Scales several legs and keeps every muscle's stroke in proportion.
+/// Scales each leg of `limbs` about its hip by `factor`. It raises the body if
+/// a node went below the ground, clamps the nodes into the start region and
+/// scales every muscle's stroke by how much its span changed.
 fn scale_legs(c: &mut Creature, limbs: &[BoneIds], factor: f32) {
     let before = spans(c);
     for limb in limbs {
@@ -124,7 +129,9 @@ fn scale_legs(c: &mut Creature, limbs: &[BoneIds], factor: f32) {
     keep_strokes(c, &before);
 }
 
-/// Strengthens the muscles of a leg and gives them an elastic tendon.
+/// Multiplies the stiffness of the active muscles on `limb` by `stiffness`
+/// (within 1 to 120) and raises their tendon to at least `tendon`. A muscle
+/// with no stroke is left alone.
 fn tune_leg(c: &mut Creature, limb: &[usize], stiffness: f32, tendon: f32) {
     for i in muscles_on(c, limb, false) {
         let m = &mut c.muscles[i];
@@ -135,9 +142,10 @@ fn tune_leg(c: &mut Creature, limb: &[usize], stiffness: f32, tendon: f32) {
     }
 }
 
-/// A trunk node to hang a new leg from, the best of three random ones:
-/// few legs there, far from the other hips and near the height of the hip
-/// of `from`.
+/// A trunk node to hang a leg copied from the hip `from`: the best of three
+/// random ones, with few legs on it, far in x from the nearest hip (up to 1)
+/// and near the height of `from`. With `other` set, `from` itself is not a
+/// candidate. It is `None` when there is no candidate.
 fn pick_site(
     c: &Creature,
     legs: &[BoneIds],
@@ -167,8 +175,10 @@ fn pick_site(
         .min_by(|&p, &q| score(p).total_cmp(&score(q)))
 }
 
-/// Copies the leg `limb` onto `at`, with its hip on `at`, optionally
-/// reflected. Returns the new root bone.
+/// Copies the leg `limb` so that its hip sits on node `at`, reflected about the
+/// vertical through the hip when `mirror` is set. The copy brings at most three
+/// muscles, the ones with the most drive, and their phases move by `phase`
+/// cycles. Returns the new root bone, or `None` when there is no room.
 fn copy_leg(
     c: &mut Creature,
     cfg: &Config,
@@ -186,8 +196,11 @@ fn copy_leg(
     copy_branch_limited(c, cfg, root, at, place, mirror, phase, 3)
 }
 
-/// Copies random legs onto the trunk until there are `target` walkers or the
-/// room is used up.
+/// Copies random walkers onto the trunk until there are `target` of them, in at
+/// most 8 copies. It stops at the first copy that does not fit. A copy onto the
+/// hip of its source is reflected, and any other copy is reflected half the
+/// time. The copies keep the phase of their source, because the caller retimes
+/// the legs.
 fn grow_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, target: usize) {
     for _ in 0..8 {
         let legs = walkers(c);
@@ -206,9 +219,12 @@ fn grow_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, target: usize) {
     }
 }
 
-/// Puts the leg count and timing of a plan on a body: grows legs to `target`,
-/// gives back half of the new nodes as idle tips, retimes the walkers by
-/// `pattern` from the phase of the rearmost, and closes the ring.
+/// Puts the leg count and timing of a plan on the body. It grows the walkers to
+/// `target`, sheds idle limb tips of the old body (`shed_tips`), up to half as
+/// many as the nodes it added, retimes the walkers by `pattern` from the phase
+/// of the rearmost, and commits the child. It returns false when the body has
+/// no walker, when fewer than `keep` are left after the growth, when the
+/// rearmost has no muscle, or when the child does not differ.
 fn plan_legs(
     c: &mut Creature,
     cfg: &Config,
@@ -236,7 +252,9 @@ fn plan_legs(
     commit(c, next, cfg, rng)
 }
 
-/// Closes the motor ring on the child and keeps it if it differs.
+/// The last step of an operator. It closes the motor ring of the child `next`
+/// (`close_ring`, which puts the bones in canonical order) and copies `next`
+/// into `c` if it differs. Returns whether it did.
 fn commit(c: &mut Creature, mut next: Creature, cfg: &Config, rng: &mut Rng) -> bool {
     if !close_ring(&mut next, cfg, rng) {
         return false;
@@ -248,9 +266,12 @@ fn commit(c: &mut Creature, mut next: Creature, cfg: &Config, rng: &mut Rng) -> 
     true
 }
 
-/// Hangs a swinging bone with a hinge muscle from `site`, `angle` radians
-/// from the +x axis, with a weight near its end. It swings at `phase`, with
-/// the rhythm of `template`.
+/// Hangs a swinging bone from node `site`. The bone is `length` long and points
+/// `angle` radians from the +x axis (its tip is clamped into the start region).
+/// It has a joint range of 0.4 to 0.9 rad each way and carries a weight of
+/// `mass` at 0.85 of its length. A hinge muscle with the rhythm of `template`
+/// swings it at phase `phase`. Returns false when there is no room for one node
+/// and two muscles, or when `site` has no bone above it, which is the head.
 #[allow(clippy::too_many_arguments)]
 fn add_swinger(
     c: &mut Creature,
@@ -279,7 +300,7 @@ fn add_swinger(
     hinge_muscle(c, cfg, c.bones.len() - 1, template, phase, rng)
 }
 
-/// The mean bone length of some legs.
+/// The mean rest length of the bones of `legs`, or 0.3 when they have none.
 fn mean_bone(c: &Creature, legs: &[BoneIds]) -> f32 {
     let (sum, n) = legs
         .iter()
@@ -288,7 +309,8 @@ fn mean_bone(c: &Creature, legs: &[BoneIds]) -> f32 {
     if n == 0 { 0.3 } else { sum / n as f32 }
 }
 
-/// The strongest muscle on the legs, as a template for a new one.
+/// A copy of the strongest muscle on `legs`, as a template for a new one. It is
+/// `None` when the legs have no muscle.
 fn template_of(c: &Creature, legs: &[BoneIds]) -> Option<Muscle> {
     let on: BoneIds = legs.iter().flat_map(|l| l.iter().copied()).collect();
     let muscles = muscles_on(c, &on, false);
