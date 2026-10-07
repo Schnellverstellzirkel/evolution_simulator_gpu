@@ -34,8 +34,8 @@ fn ages(experiment: &storage::Experiment, elite: &qd::Elite) -> (u32, u32) {
     (now.saturating_sub(plan_start), root)
 }
 
-/// The 10%, 50% and 90% points and the maximum of `values`, as text. It is
-/// `none` for no values.
+/// The 10%, 50% and 90% points and the maximum of `values`, as text. An empty
+/// slice gives `none`.
 fn quantiles(values: &[f32]) -> String {
     if values.is_empty() {
         return "none".into();

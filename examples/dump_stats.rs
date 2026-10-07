@@ -261,7 +261,8 @@ fn main() -> anyhow::Result<()> {
         pct(nursery_entered, nursery.len()),
         pct(nursery_passed, nursery.len())
     );
-    // R1's rule applied directly, because `Ladder::apply` skips the nurseries.
+    // R1's rule applied directly, because `Ladder::apply` exempts nursery rows
+    // from R1.
     let r1_nursery = nursery
         .iter()
         .filter(|r| r.entered & NURSERY != 0 && r.steps() > 60)

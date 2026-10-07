@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
         .nth(2)
         .and_then(|v| v.parse().ok())
         .unwrap_or(20.0);
-    // A fixed seed and no early screen, so every trial runs in full.
+    // A fixed seed, and no early screen so that every trial runs in full.
     let cfg = Config {
         population: count,
         duration,

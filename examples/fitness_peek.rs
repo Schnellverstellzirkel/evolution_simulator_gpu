@@ -12,8 +12,9 @@ fn main() -> anyhow::Result<()> {
     let e = storage::load(std::path::Path::new(
         &std::env::args().nth(1).expect("checkpoint"),
     ))?;
-    // One line for an archive: its elites, its best fitness, how many elites
-    // sit within 0.1 m of that best, and its five best fitness values.
+    // Prints one line for an archive: its number of elites, its best fitness,
+    // how many elites sit within 0.1 m of that best, and its five best fitness
+    // values.
     let show = |name: String, a: &evolution_simulator::qd::QdArchive| {
         let mut f: Vec<f32> = a.entries.iter().map(|x| x.fitness).collect();
         f.sort_by(|a, b| b.total_cmp(a));
