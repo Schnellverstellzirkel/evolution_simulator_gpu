@@ -677,8 +677,11 @@ impl Experiment {
     /// archives with the current settings, into `arena`: the genes of the
     /// block bred for these slots last time, whose memory the new block
     /// reuses when nothing else holds it. Elites queued by a world change
-    /// take the slots of their own islands first. An island without elites
-    /// breeds new random bodies.
+    /// take the slots of their own islands first. The refuge, the founder
+    /// bank, the hall of fame and the hub's pen fill some of the other slots,
+    /// and the plans from `plan_offspring` fill the rest. An island without
+    /// elites breeds new random bodies. The block's trial flags and the
+    /// breeding timers are set here too.
     pub(super) fn breed_block(
         &mut self,
         first: usize,
@@ -726,7 +729,10 @@ impl Experiment {
                 protection: p.protection,
             })
             .collect();
-        // Reseeded elites first, then the children.
+        // Creatures that take a position without a plan: reseeded elites,
+        // then children of the refuge, the founder bank, the hall of fame and
+        // the pen. Each one is recorded as `Birth::RANDOM`. `Population::breed`
+        // writes them at their positions and breeds the plans in the others.
         let mut lead: Vec<(usize, Creature)> = Vec::new();
         if !self.reseed.is_empty() {
             for (k, &slot) in slots.iter().enumerate() {
@@ -736,8 +742,9 @@ impl Experiment {
                 }
             }
         }
-        // After a world change the old champions keep breeding in their
-        // island's own slots for a few generations.
+        // After a world change the old champions keep breeding in some of
+        // their island's own slots for a few generations. `Refuge::child`
+        // draws which slots.
         if self.generation < self.refuge.until {
             let islands = island_count();
             let reseeded: std::collections::HashSet<usize> = lead.iter().map(|&(k, _)| k).collect();
@@ -756,8 +763,10 @@ impl Experiment {
             }
             lead.sort_by_key(|&(k, _)| k);
         }
-        // The founder bank breeds in the main islands' own slots, and the hall
-        // of fame in the hub's.
+        // The founder bank breeds in a share of the main islands' own slots
+        // (`FOUNDER_SHARE`), and the hall of fame in a share of the hub's
+        // (`HALL_SHARE`). A child gets a local mutation, and sometimes a
+        // structural one.
         if !self.founders.is_empty() || !self.hall.is_empty() {
             let islands = island_count();
             let hub = hub_island();
@@ -795,7 +804,8 @@ impl Experiment {
             }
             lead.sort_by_key(|&(k, _)| k);
         }
-        // Wild champions in the hub's pen breed in the hub's own slots.
+        // Wild champions in the hub's pen breed in a share of the hub's own
+        // slots (`PEN_SHARE`), with the same mutations as the founders.
         if !self.pen.is_empty() {
             let islands = island_count();
             let hub = hub_island();
@@ -854,10 +864,8 @@ impl Experiment {
             self.generation,
             self.breed_round,
         );
-        // Each creature's flags for its trial: the audit lane, and the
-        // exemption of nurseries and immigrants from the early rungs.
-        // The median fitness of each arena's behavior elites: a parent
-        // above it is a strong one.
+        // The median fitness of each arena's behavior elites: a parent at or
+        // above it is a strong one. Only the early rungs use it.
         let medians: Vec<f32> = if cfg.rungs.is_some() {
             self.islands
                 .iter()
@@ -879,6 +887,10 @@ impl Experiment {
         } else {
             Vec::new()
         };
+        // Each creature's flags for its trial: the audit lane, and the
+        // exemptions from the early rungs. Immigrants and lead creatures
+        // (both are `Emitter::Restart` births), children of strong parents
+        // and nursery bodies are exempt.
         population.flags.clear();
         population.flags.extend((0..count).map(|k| {
             let slot = first + k;
@@ -891,7 +903,8 @@ impl Experiment {
             let arenas = self.islands.len().max(arena_count());
             let arena = qd::arena_of_slot(slot, arenas);
             // A child whose parent is a strong elite that the rules would
-            // stop skips those rungs.
+            // stop skips those rungs. So does a child whose parent has no
+            // known profile (`rungs::parent_exemptions`).
             if let Some(rules) = &cfg.rungs {
                 let parent = births[k].parent_id.and_then(|id| self.lineage.get(&id));
                 let strong = parent
@@ -910,6 +923,8 @@ impl Experiment {
             }
             flags
         }));
+        // For the generation dump: the block's births and parents. The lead
+        // creatures have no parent in its rows.
         if let (Some(parents), Some(dump)) = (dump_parents, &self.dump) {
             let reseeded: Vec<usize> = lead.iter().map(|&(k, _)| k).collect();
             dump.lock().unwrap_or_else(|e| e.into_inner()).bred(
@@ -925,10 +940,12 @@ impl Experiment {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         };
         // Children are written into the arena as they are bred, so the
-        // write stage is part of emitting.
+        // write stage is part of emitting and its timer stays 0.
         add(0, planned_at);
         add(1, total.saturating_sub(planned_at));
         BREED_LATE.fetch_add(late as u64, std::sync::atomic::Ordering::Relaxed);
+        // A hint means the old arena was still shared, so the block went
+        // into a new one.
         if hint.is_some() {
             BREED_LATE.fetch_add(1 << 32, std::sync::atomic::Ordering::Relaxed);
         }
