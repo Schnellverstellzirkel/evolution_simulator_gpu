@@ -87,7 +87,7 @@ impl App {
                 world_changed = true;
             }
         });
-        if let Some(live) = &live
+        if let Some(live) = live
             && live.physics_differs(&self.config)
         {
             ui.label(
@@ -431,10 +431,10 @@ fn effect_row(
                             egui::StrokeKind::Inside,
                         );
                     }
-                    let text_color = match (lit, away) {
-                        (true, true) => theme.go_text,
-                        (true, false) => theme.ink,
-                        _ => theme.ink,
+                    let text_color = if lit && away {
+                        theme.go_text
+                    } else {
+                        theme.ink
                     };
                     let at = rect.center() - galley.size() / 2.;
                     ui.painter()
