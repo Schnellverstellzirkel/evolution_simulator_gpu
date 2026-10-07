@@ -669,8 +669,14 @@ fn bin(value: f32, low: f32, high: f32, count: u8) -> u8 {
     (((value.clamp(low, high) - low) / (high - low) * count as f32).floor() as u8).min(count - 1)
 }
 
-fn behavior_distance(a: &[f32; NEIGHBOR_AXES], b: &[f32; NEIGHBOR_AXES]) -> f32 {
-    ((0..a.len()).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>() / a.len() as f32).sqrt()
+/// The sum of squared differences of two behavior vectors.
+fn behavior_squares(a: &[f32; NEIGHBOR_AXES], b: &[f32; NEIGHBOR_AXES]) -> f32 {
+    (0..a.len()).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>()
+}
+/// The behavior distance (the root mean square difference) of a sum of
+/// squares.
+fn distance_of_squares(squares: f32) -> f32 {
+    (squares / NEIGHBOR_AXES as f32).sqrt()
 }
 
 impl Topology {
@@ -1170,30 +1176,108 @@ impl QdArchive {
             }
         }
     }
+    /// For each row of behavior cells that differ only along the last
+    /// behavior axis, a bit per filled cell of the row, so a neighbor search
+    /// skips a row's empty cells at once. Row `r` holds the cells
+    /// `(r / b5 * b4 + a4) * b5 + r % b5`, with `b4` and `b5` the counts of
+    /// the last two axes.
+    fn filled_rows(&self) -> Vec<u8> {
+        const _: () = assert!(MOVEMENT_BINS[3] <= 8);
+        let bins = self.classes().bins();
+        let (b4, b5) = (bins[4] as usize, bins[5] as usize);
+        let mut rows = vec![0u8; self.cells.len() / b4];
+        for (index, &slot) in self.cells.iter().enumerate() {
+            if slot != EMPTY_CELL {
+                rows[index / (b4 * b5) * b5 + index % b5] |= 1 << (index / b5 % b4);
+            }
+        }
+        rows
+    }
+    /// `for_each_neighbor` row by row through `filled_rows`: the same elites
+    /// in the same order, without a look at each empty cell.
+    fn for_each_filled_neighbor(
+        &self,
+        filled: &[u8],
+        center: &Niche,
+        radius: i32,
+        mut visit: impl FnMut(usize),
+    ) {
+        let bins = self.classes().bins();
+        if cell_index(center, &bins).is_none() || self.cells.is_empty() {
+            return;
+        }
+        let range = |axis: usize| {
+            let at = center.0[axis] as i32;
+            (at - radius).max(0) as usize..=(at + radius).min(bins[axis] as i32 - 1) as usize
+        };
+        let (b1, b2, b3, b4, b5) = (
+            bins[1] as usize,
+            bins[2] as usize,
+            bins[3] as usize,
+            bins[4] as usize,
+            bins[5] as usize,
+        );
+        let class = center.0[NEIGHBOR_AXES] as usize;
+        let last = range(4);
+        let span = ((1u16 << (last.end() + 1)) - (1u16 << last.start())) as u8;
+        let c = &center.0;
+        let own = ((c[0] as usize * b1 + c[1] as usize) * b2 + c[2] as usize) * b3 + c[3] as usize;
+        for a0 in range(0) {
+            for a1 in range(1) {
+                for a2 in range(2) {
+                    for a3 in range(3) {
+                        let outer = ((a0 * b1 + a1) * b2 + a2) * b3 + a3;
+                        let mut bits = filled[outer * b5 + class] & span;
+                        if outer == own {
+                            bits &= !(1 << c[4]);
+                        }
+                        while bits != 0 {
+                            let a4 = bits.trailing_zeros() as usize;
+                            bits &= bits - 1;
+                            visit(self.cells[(outer * b4 + a4) * b5 + class] as usize);
+                        }
+                    }
+                }
+            }
+        }
+    }
     /// Novelty and local competition of the behavior elite at `index`, from
     /// the elites in the cells around it. `rows` holds every elite's
-    /// behavior vector and distance.
-    fn behavior_score_of(&self, index: usize, rows: &[ScoreRow]) -> (usize, f32, f32, f32) {
+    /// behavior vector and distance, `filled` the archive's `filled_rows`.
+    fn behavior_score_of(
+        &self,
+        index: usize,
+        rows: &[ScoreRow],
+        filled: &[u8],
+    ) -> (usize, f32, f32, f32) {
         // The nearest `LOCAL_NEIGHBORS` neighbors, closest first, as
-        // (distance, fitness), and how many neighbors there were.
-        let mut nearest = [(f32::INFINITY, 0.0f32); LOCAL_NEIGHBORS];
+        // (distance, fitness, sum of squares), and how many neighbors there
+        // were.
+        let mut nearest = [(f32::INFINITY, 0.0f32, f32::INFINITY); LOCAL_NEIGHBORS];
         let mut found = 0usize;
         let mut near = 0usize;
         let own = &rows[index];
         for radius in 1..=2 {
-            nearest.fill((f32::INFINITY, 0.0));
+            nearest.fill((f32::INFINITY, 0.0, f32::INFINITY));
             found = 0;
-            self.for_each_neighbor(&self.entries[index].niche, radius, |slot| {
+            self.for_each_filled_neighbor(filled, &self.entries[index].niche, radius, |slot| {
                 found += 1;
                 let other = &rows[slot];
-                let distance = behavior_distance(&own.behavior, &other.behavior);
+                let squares = behavior_squares(&own.behavior, &other.behavior);
+                // The mean and the root keep order, so a sum of squares no
+                // smaller than the farthest kept one's is no closer: the
+                // test below would turn it down.
+                if squares >= nearest[LOCAL_NEIGHBORS - 1].2 {
+                    return;
+                }
+                let distance = distance_of_squares(squares);
                 if distance < nearest[LOCAL_NEIGHBORS - 1].0 {
                     let mut at = LOCAL_NEIGHBORS - 1;
                     while at > 0 && nearest[at - 1].0 > distance {
                         nearest[at] = nearest[at - 1];
                         at -= 1;
                     }
-                    nearest[at] = (distance, other.fitness);
+                    nearest[at] = (distance, other.fitness, squares);
                 }
             });
             if radius == 1 {
@@ -1208,10 +1292,10 @@ impl QdArchive {
             return (index, 1.0, 1.0, frontier);
         }
         let nearest = &nearest[..LOCAL_NEIGHBORS.min(found)];
-        let novelty = nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
+        let novelty = nearest.iter().map(|(d, _, _)| *d).sum::<f32>() / nearest.len() as f32;
         let local = nearest
             .iter()
-            .map(|(_, f)| match own.fitness.total_cmp(f) {
+            .map(|(_, f, _)| match own.fitness.total_cmp(f) {
                 std::cmp::Ordering::Greater => 1.0,
                 std::cmp::Ordering::Equal => 0.5,
                 std::cmp::Ordering::Less => 0.0,
@@ -1279,9 +1363,10 @@ impl QdArchive {
                 fitness: elite.fitness,
             })
             .collect();
+        let filled = self.filled_rows();
         let scores: Vec<(usize, f32, f32, f32)> = indices
             .par_iter()
-            .map(|&index| self.behavior_score_of(index, &rows))
+            .map(|&index| self.behavior_score_of(index, &rows, &filled))
             .collect();
         let len = self.entries.len();
         let (mut novelty, mut local_competition, mut frontier) = if partial {
@@ -2431,6 +2516,72 @@ mod tests {
         config::Config,
         evolution::{self, Population},
     };
+
+    #[test]
+    fn row_by_row_neighbor_search_visits_the_cells_one_by_one_does() {
+        use super::{Descriptor, Emitter, QdArchive};
+        let config = Config {
+            population: 300,
+            random_seed: false,
+            seed: 5,
+            ..Config::default()
+        };
+        let population = evolution::create(&config).unwrap();
+        // Refined, so the elites fill cells of every body class.
+        let mut archive = QdArchive::default();
+        archive.set_refined(true);
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 32) as u32
+        };
+        for _ in 0..600 {
+            let descriptor = Descriptor {
+                nodes: (2 + next() % 14) as u16,
+                aspect_ratio: (next() % 40) as f32 / 10.0,
+                ground_contact: (next() % 100) as f32 / 100.0,
+                gait_frequency: (next() % 60) as f32 / 10.0,
+                vertical_oscillation: 0.1,
+                mean_height: (next() % 300) as f32 / 100.0 + 0.1,
+                feet: (next() % 5) as f32 + 1.0,
+                ..Default::default()
+            };
+            let fitness = (next() % 1000) as f32 / 10.0;
+            let index = next() as usize % 300;
+            archive.offer(
+                &population,
+                index,
+                descriptor,
+                fitness,
+                false,
+                Emitter::Cma,
+                0,
+                0,
+            );
+        }
+        assert!(archive.behavior_count() > 100);
+        let classes = |axis: usize| {
+            let values: std::collections::BTreeSet<u8> = archive
+                .behavior_indices
+                .iter()
+                .map(|&i| archive.entries[i].niche.0[axis])
+                .collect();
+            values.len()
+        };
+        assert!(classes(2) > 1 && classes(5) > 1);
+        let filled = archive.filled_rows();
+        for &i in &archive.behavior_indices {
+            let niche = &archive.entries[i].niche;
+            for radius in 1..=2 {
+                let (mut cells, mut rows) = (Vec::new(), Vec::new());
+                archive.for_each_neighbor(niche, radius, |slot| cells.push(slot));
+                archive.for_each_filled_neighbor(&filled, niche, radius, |slot| rows.push(slot));
+                assert_eq!(cells, rows);
+            }
+        }
+    }
 
     #[test]
     fn partial_score_refresh_matches_a_full_refresh() {
