@@ -349,13 +349,22 @@ impl Playback {
             .map_or_else(|| physics::fitness(&self.nodes), |(_, distance)| distance)
     }
 }
-/// Frame-varying drawing state: muscle time, fallen look, and the per-node
-/// marks for ground contact and broken joints.
+/// What the scene draws over a creature's pose in one frame: the clock that
+/// sets each muscle's length, whether the creature has fallen, the nodes on
+/// the ground, the nodes at broken joints, and the muscle energy and forces.
+/// The default has no marks and shows every muscle rested at time 0.
 #[derive(Default)]
 pub(super) struct FrameMarks {
+    /// Seconds into the trial. The scene reads each muscle's target length at
+    /// this time to show how far the muscle contracts.
     pub(super) time: f32,
+    /// Whether the replay has reached the fall. The muscles are then limp and
+    /// the head is marked.
     pub(super) fallen: bool,
+    /// Per node: whether it touches the ground (`node_contact`).
     pub(super) contact: Vec<bool>,
+    /// Per node: whether it is an end of a bone whose joint is broken
+    /// (`broken_nodes`).
     pub(super) broken: Vec<bool>,
     /// Stored energy per muscle (1 is rested), for fading tired muscles.
     pub(super) energy: Vec<f32>,
@@ -363,10 +372,13 @@ pub(super) struct FrameMarks {
     /// arrows when `arrows` is on.
     pub(super) muscle_force: Vec<f32>,
     pub(super) ground_force: Vec<f32>,
+    /// Whether to draw the force arrows.
     pub(super) arrows: bool,
 }
 impl FrameMarks {
-    /// Contact and broken-joint marks of a playback's current frame.
+    /// The marks of a playback's current frame. `arrows` is off, and the
+    /// caller turns it on. The developer switch `EVOLUTION_SMOKE_ENERGY` sets
+    /// the energy of every muscle, for screenshots.
     pub(super) fn of(playback: &Playback) -> Self {
         let mut marks = Self {
             time: playback.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
@@ -393,7 +405,7 @@ impl FrameMarks {
                 .unwrap_or_default(),
             arrows: false,
         };
-        // Developer screenshots: EVOLUTION_SMOKE_ENERGY=0.15 draws every muscle at that store.
+        // Developer screenshots: `EVOLUTION_SMOKE_ENERGY=0.15` draws every muscle at that store.
         if let Some(level) = std::env::var("EVOLUTION_SMOKE_ENERGY")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -422,15 +434,17 @@ impl FrameMarks {
         marks
     }
 }
-/// The highest point the body reaches in a recording (m above the ground).
+/// The highest point of the body in `frames` (m): the top of the highest node,
+/// at least 0.1.
 fn body_peak(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
     frames
         .iter()
         .flat_map(|frame| frame.iter().zip(nodes).map(|(p, n)| p[1] + n.radius))
         .fold(0.1f32, f32::max)
 }
-/// A creature's typical height over a recording (m above the ground): the
-/// 90th percentile of the top of the body, so one leap does not shrink it.
+/// A creature's typical height in `frames` (m): the 90th percentile of the
+/// top of the body per frame, so one leap does not raise it. It is at least
+/// 0.1, and 1 when there are no frames.
 pub(super) fn body_height(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
     let mut tops: Vec<f32> = frames
         .iter()
@@ -448,8 +462,9 @@ pub(super) fn body_height(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
     tops.sort_by(f32::total_cmp);
     tops[(tops.len() - 1) * 9 / 10].max(0.1)
 }
-/// The follow camera's target per recorded frame: the mass-weighted center of
-/// the body, averaged over `CAMERA_WINDOW` seconds on either side.
+/// The x position (m) where the follow camera looks at each frame: the
+/// mass-weighted center of the body, averaged over `CAMERA_WINDOW` seconds on
+/// either side. The window is cut short at the ends of the recording.
 fn camera_track(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> Vec<f32> {
     let mass: f32 = nodes.iter().map(|n| n.mass).sum::<f32>().max(1e-6);
     let centers: Vec<f64> = frames
@@ -472,11 +487,13 @@ fn camera_track(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> Vec<f32> {
         })
         .collect()
 }
-/// Marks the nodes touching the ground in `positions`, with the threshold
-/// `size_report` uses: a node is down when its center sits within 2 mm of the
-/// terrain surface plus its own radius measured along the local normal. Gaps,
-/// hurdles and the creature's own quake phase lower and raise the surface here
-/// too, so the marks follow the ground that is drawn.
+/// Sets `out[i]` when node `i`, at `positions[i]`, touches the ground, and
+/// clears the other entries. A node touches when its center is within 2 mm (the
+/// kernel's `CONTACT_SLACK`) of the ground height under it plus its radius
+/// measured along the local normal. The ground has the bumps, the slope, the
+/// gaps and the hurdles of `config` and the creature's own quake phase, so the
+/// marks follow the ground that is drawn and scored. With no ground nothing
+/// touches.
 pub(super) fn node_contact(
     nodes: &[Node],
     positions: &[[f32; 2]],
@@ -509,9 +526,11 @@ pub(super) fn node_contact(
         *down = position[1] <= floor + 0.002;
     }
 }
-/// Marks both ends of every bone in `broken`, the bits of the bones whose
-/// joint the scoring engine found past its break angle in a recorded frame
-/// (`replay_forces::Forces::broken`).
+/// Sets `out[i]` for both nodes of every bone whose bit is set in `broken`,
+/// and clears the other entries. `broken` is one entry of
+/// `replay_forces::Forces::broken`: bit `j` is bone `j`, set when the kernel
+/// found its joint past the break angle in that frame. Bones after the 64th
+/// have no bit.
 pub(super) fn broken_nodes(creature: &Creature, broken: u64, out: &mut [bool]) {
     out.fill(false);
     for (j, bone) in creature.bones.iter().enumerate().take(64) {
