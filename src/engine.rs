@@ -1,9 +1,10 @@
-//! Common interface for the evaluation devices: NVIDIA GPUs through CUDA.
+//! The GPU engines and the thread that runs each one.
 //!
-//! An engine accepts units of creatures, evaluates them asynchronously on its
-//! own thread, and returns raw per-creature results in unit order. Callers
-//! hand over an immutable population, shared with any retained submission,
-//! so packing and simulation never hold up the caller.
+//! An `Engine` takes units of creatures and returns one raw result per
+//! creature, in unit order. `gpu_engine` opens a `CudaEngine` on a thread of
+//! its own that packs the next unit while earlier units run, records replays
+//! with the scoring kernel and waits out GPU memory shortages. `scheduler`
+//! routes work to the engines, and `cuda_engine` runs the kernel.
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
@@ -21,7 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A unit an engine has finished, as `Engine::poll` returns it.
 pub struct Finished {
+    /// The ticket that `Engine::submit` returned for the unit.
     pub ticket: u64,
     /// One result per creature, in unit order.
     pub results: Vec<GpuResult>,
@@ -33,7 +36,11 @@ pub struct Finished {
 /// before every step and after the last, and the result the kernel scored in
 /// the same run.
 pub struct Recording {
+    /// `[frame][node]`: the node positions in the creature's own node
+    /// numbering. The settling steps show the start pose, and each later
+    /// frame follows one step of the timed trial.
     pub frames: Vec<Vec<[f32; 2]>>,
+    /// The result the kernel scored in the same run.
     pub result: GpuResult,
     /// The energy, force and breakage data the kernel recorded with each
     /// frame (muscle energy, muscle force, ground contact, friction, and
@@ -41,19 +48,26 @@ pub struct Recording {
     pub forces: Option<crate::replay_forces::Forces>,
 }
 
+/// A request to record one creature's trial, sent to the GPU engine thread by
+/// `record_on_gpu`. The answer goes back through `reply`.
 struct ReplayRequest {
     creature: Creature,
     cfg: Config,
     reply: mpsc::Sender<Result<Recording, String>>,
 }
 
-/// Sender for replay recording requests; set by the GPU engine thread that
-/// scores the archive's creatures, so other threads can request recordings.
+/// Where replay requests go: the engine thread of the GPU that scores the
+/// archive. `ThreadedEngine::publish_replays` sets it, so that any thread can
+/// ask for a recording with `record_on_gpu`.
 static REPLAYS: std::sync::Mutex<Option<mpsc::Sender<ReplayRequest>>> = std::sync::Mutex::new(None);
 
 /// Records `creature`'s trial on the GPU whose scores the archive holds,
-/// with the kernel that scores evolution, waiting up to `timeout`. None
-/// when no GPU evaluates or it cannot answer in time.
+/// with the kernel that scores evolution, waiting up to `timeout`. The trial
+/// is the one `cfg` describes. An early screen or early rungs in `cfg` can
+/// end the scored trial early, and the creature then goes limp. `replay`
+/// clears both. Returns `None` when no GPU engine thread takes requests, when
+/// the recording fails or when the GPU does not answer in time. A failure and
+/// a timeout also print a message.
 pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Option<Recording> {
     let sender = REPLAYS.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
     let (reply, answer) = mpsc::channel();
@@ -80,16 +94,17 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
 /// A creature's full trial for the replay viewer and the result scored in
 /// the same run, recorded by the scoring kernel on the GPU that scores the
 /// archive, with the energy, forces and breakage data it recorded with each
-/// frame. A replay runs the full trial, without the early screen. None when
-/// the GPU did not answer within `patience`.
+/// frame. A replay runs the full trial, without the early screen and the
+/// early rungs. Returns `None` when no recording came back within `patience`
+/// (`record_on_gpu`).
 pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<Replay> {
     let cfg = Config {
         screen: None,
         rungs: None,
         ..cfg.clone()
     };
-    // A fine trial records several frames per standard step; the viewer
-    // plays standard steps, so it keeps one frame per standard step.
+    // A trial at a finer rate records more than one frame per standard step.
+    // The viewer plays standard steps, so it keeps one frame per standard step.
     let every = (cfg.fidelity().rate / crate::physics::Fidelity::standard().rate).max(1) as usize;
     let recording = record_on_gpu(creature, &cfg, patience)?;
     Some(thin(
@@ -100,13 +115,15 @@ pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<R
     ))
 }
 
-/// A replay for the viewer: frames, result, and optional forces.
+/// A replay for the viewer: the frames (`[frame][node]`), the result scored in
+/// the same run, and the recorded forces when the engine returned them.
 pub type Replay = (
     Vec<Vec<[f32; 2]>>,
     GpuResult,
     Option<crate::replay_forces::Forces>,
 );
-/// Keeps every `every`-th frame (the first and the last always).
+/// Keeps every `every`-th frame of the frames and of each list of forces, and
+/// always the first and the last frame.
 fn thin(
     frames: Vec<Vec<[f32; 2]>>,
     result: GpuResult,
@@ -134,13 +151,17 @@ fn thin(
     (keep(frames, every), result, forces)
 }
 
-/// Whether `cfg` runs a confirmation trial: its physics is finer than the
-/// standard (`scheduler::confirm_config`).
+/// Whether `cfg` runs a confirmation trial: its physics differs from the
+/// standard physics (`scheduler::confirm_config` sets the fine physics).
 pub fn is_confirmation(cfg: &Config) -> bool {
     cfg.fidelity() != crate::physics::Fidelity::standard()
 }
 
+/// An evaluation device that takes units of creatures and returns one raw
+/// result per creature. `submit` queues a unit and returns its ticket, and
+/// `poll` returns finished units with the ticket they were queued under.
 pub trait Engine: Send {
+    /// The name of the device.
     fn name(&self) -> String;
     /// Largest body (in nodes) this engine can evaluate.
     fn max_nodes(&self) -> usize;
@@ -151,56 +172,82 @@ pub trait Engine: Send {
     fn free_confirm_slots(&self) -> usize {
         self.free_slots()
     }
-    /// Queues a unit; `unit` holds exactly the unit's creatures, in order.
+    /// Queues a unit and returns its ticket. `unit` holds exactly the unit's
+    /// creatures, in order.
     fn submit(&mut self, unit: Population, cfg: &Config) -> Result<u64> {
         self.submit_shared(Arc::new(unit), cfg)
     }
-    /// Queues an immutable unit without copying its population storage.
+    /// Queues an immutable unit without copying its population storage, and
+    /// returns its ticket. The caller may keep its own `Arc`. Packing and
+    /// simulation happen on the engine thread, so they do not hold up the
+    /// caller.
     fn submit_shared(&mut self, unit: Arc<Population>, cfg: &Config) -> Result<u64>;
-    /// Returns the next finished unit without blocking.
+    /// Returns the next finished unit without blocking, or `None` when no
+    /// unit has finished. If the engine has failed, it returns the error
+    /// after the units that finished before the failure.
     fn poll(&mut self) -> Result<Option<Finished>>;
-    /// Blocks up to `timeout` for the oldest queued unit.
+    /// Blocks up to `timeout` until a unit has finished or the engine has
+    /// failed. It returns at once when a finished unit is already waiting.
     fn wait(&mut self, timeout: Duration);
+    /// Bytes of device and host memory the engine holds for its units,
+    /// buffers kept for reuse included. The default is 0.
     fn allocated_bytes(&self) -> u64 {
         0
     }
 }
 
-/// Front end shared by engines that run on their own thread.
+/// The front end of a GPU engine thread, which `gpu_engine` makes. It sends
+/// units to the thread and collects the finished ones. If the thread fails, it
+/// returns the error after the units that finished before the failure.
 pub struct ThreadedEngine {
     name: String,
     max_nodes: usize,
+    /// Standard units allowed on the engine thread at once: one for each GPU
+    /// slot (`gpu_slots`) and one that packs.
     depth: usize,
     /// Closed on drop so the engine thread finishes queued work and exits.
     jobs: Option<mpsc::Sender<(u64, Arc<Population>, Config)>>,
+    /// What the engine thread sends back: a finished unit, or the reason it
+    /// stopped.
     done: mpsc::Receiver<Result<Finished, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// Tickets of the units on the engine thread, and whether each is a
     /// confirmation trial.
     queued: VecDeque<(u64, bool)>,
+    /// Finished units received from the engine thread that `poll` has not
+    /// returned yet.
     ready: VecDeque<Finished>,
     /// Retained until teardown, after all successful results have been delivered.
     failure: Option<String>,
     next_ticket: u64,
+    /// Bytes the engine thread holds (`Engine::allocated_bytes`), which it
+    /// updates after each submission.
     allocated: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Where a GPU engine takes replay requests.
     replays: Option<mpsc::Sender<ReplayRequest>>,
 }
 
 impl ThreadedEngine {
-    /// Makes this GPU the one that records replays (`replay`).
+    /// Makes this GPU the one that records replays (`record_on_gpu`). Call it
+    /// on the engine of the GPU that scores the archive.
     pub fn publish_replays(&self) {
         if let Some(sender) = &self.replays {
             *REPLAYS.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
         }
     }
 
+    /// Records why the engine stopped (the first reason stays) and closes the
+    /// job channel, so the engine thread finishes its work and exits.
     fn fail(&mut self, reason: &str) {
         self.failure
             .get_or_insert_with(|| format!("{} failed: {reason}", self.name));
         self.jobs.take();
     }
 
+    /// Moves what the engine thread has sent into `ready`. It waits up to
+    /// `timeout` for the first message and takes the rest without waiting.
+    /// An error from the thread or a closed channel goes to `fail` and ends
+    /// the loop.
     fn receive(&mut self, mut timeout: Duration) {
         while self.failure.is_none() {
             let item = if timeout.is_zero() {
@@ -224,6 +271,8 @@ impl ThreadedEngine {
         }
     }
 
+    /// The error for a unit that the engine thread did not take because it had
+    /// closed its job channel.
     fn submission_error(&mut self) -> anyhow::Error {
         // The worker may have finished older jobs after the initial poll,
         // then closed its job receiver before this send. Keep those results.
@@ -322,16 +371,19 @@ impl Drop for ThreadedEngine {
     }
 }
 
-/// Results of one completed submission.
+/// Results of one completed submission, as `CudaEngine::poll` returns them.
 pub struct Completed {
+    /// The device's ticket for the submission. It is not the ticket that
+    /// `Engine::submit` gave the unit.
     pub ticket: u64,
     /// The raw GPU result of every creature, in unit order.
     pub results: Vec<GpuResult>,
     /// The unit's batches, whose buffers the next unit packs into.
     pub batches: Vec<creature_kernel::LaneBatch>,
-    /// For a recording (`CudaEngine::record`): node positions as
-    /// `[creature][frame][node]`, with the batch's node stride.
+    /// For a recording (`CudaEngine::record`): every frame of the trial, one
+    /// after the other, each `creature_kernel::frame_stride` slots long.
     pub frames: Option<Vec<[f32; 2]>>,
+    /// GPU time the submission took, in seconds.
     pub gpu_seconds: f64,
 }
 
@@ -345,10 +397,10 @@ pub fn gpu_slots() -> u32 {
 /// them and one that packs.
 const CONFIRM_DEPTH: usize = 2;
 
-/// Buffer size for `size` bytes of data. Small buffers round up to a power
-/// of two, which costs little. Large ones get 25% headroom, so units of
-/// slightly different sizes reuse them, without the up to 2x waste of a
-/// power of two.
+/// Buffer size for `size` bytes of data, at least 256. Buffers up to 1 MiB
+/// round up to a power of two, which costs little. Larger ones get 25%
+/// headroom and round up to a whole number of MiB, so units of slightly
+/// different sizes reuse them, without the up to 2x waste of a power of two.
 pub fn padded_size(size: u64) -> u64 {
     const LARGE: u64 = 1 << 20;
     let size = size.max(256);
