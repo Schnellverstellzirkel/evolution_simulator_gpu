@@ -1,60 +1,62 @@
-//! The physics model of a creature: the constants the CUDA kernel is built
-//! with and `Model`, the creature's constants and starting pose, from which
-//! `kernel::pack` fills the kernel's records.
-//!
-//! `Model` numbers the nodes so that bone `j` ends at node `j + 1` and node 0
-//! is the head. The start pose comes from the bones' rest angles, with the
-//! center of mass over x = 0 and the lowest node on the ground.
-//! `docs/physics.md` describes the dynamics the kernel runs.
+//! This module holds the physics constants and `Model`, a creature's
+//! constants and start pose. `kernel::pack` fills the CUDA kernel's records
+//! from a `Model`, and `docs/physics.md` describes the dynamics the kernel
+//! runs. `Model` numbers the nodes so that bone `j` ends at node `j + 1` and
+//! node 0 is the head. The start pose comes from the bones' rest angles, with
+//! the center of mass over x = 0 and the lowest node on the ground.
 use crate::{
     config::Config,
     evolution::{Creature, NO_SENSOR},
     physics,
 };
 
-/// Passive joint damping as a time constant (s): every joint resists its
-/// relative rotation like tissue does, with a damper sized to the inertia the
-/// joint moves.
+/// The time constant (s) of passive joint damping. Each substep the kernel
+/// takes the share `substep / time constant` of every joint's turning speed,
+/// with equal and opposite pushes that keep the body's momentum.
 pub fn joint_damping() -> f32 {
     0.1
 }
-/// Hill's force-velocity relation: a muscle's active pull falls linearly
-/// with its shortening speed and vanishes at this many of its own lengths per
-/// second. It bounds a muscle's power the way real muscle does, so a body
+/// The shortening speed, in muscle lengths per second, at which a muscle's
+/// active pull is zero (Hill's force-velocity relation). The pull falls
+/// linearly with the speed. A muscle's length here is its longest length, at
+/// least 5 cm. This bounds a muscle's power as real muscle does, so a body
 /// cannot catapult itself.
 pub fn hill_speed() -> f32 {
     8.0
 }
 /// The largest acceleration (m/s^2) a muscle can give the mass it drives.
-/// A muscle's cross-section, and so its force, grows with the mass it moves:
-/// force cap = `DRIVEN_ACCELERATION` x the lighter of the two subtrees it
-/// pulls together (a bone and everything it carries), never above the fixed
-/// `Limits` cap, and its energy store scales the same way (a muscle's store
-/// is its own mass). Before, a 100 N muscle drove a 0.05 kg limb at 2,000
-/// m/s^2, turned a bone about a radian in one step and made momentum and
-/// energy the integrator did not pay for (docs/physics.md).
+/// A muscle's cross-section, and so its force, grows with the mass it moves.
+/// Its force cap is `DRIVEN_ACCELERATION` times the lighter of the two
+/// subtrees it pulls together (a bone and everything it carries), never above
+/// the fixed `Limits` cap. Its energy store scales the same way, because a
+/// muscle's store is its own mass. Without this scaling the fixed cap would
+/// drive a light limb at thousands of m/s^2.
 pub const DRIVEN_ACCELERATION: f32 = 200.0;
-/// Air drag on bones (N per m^3/s^2 of length x width): every bone feels
-/// `AIR_DRAG x length x width x speed x velocity` against its midpoint's
-/// velocity, with the width the mean diameter of its two nodes (a flat plate
-/// in the flow: half the air's density, 1.2 kg/m^3, times a drag coefficient
-/// of 1). Large fast bodies pay for moving air; it only takes energy away.
+/// Air drag on bones (kg/m^3). Every bone feels a force of
+/// `AIR_DRAG x length x width x speed x velocity` against the velocity of its
+/// midpoint, with the width the mean diameter of its two nodes. This is a
+/// flat plate in the flow: half the air's density (1.2 kg/m^3) times a drag
+/// coefficient of 1. One substep never takes more than half the bone's speed.
+/// Large fast bodies pay for moving air, and the drag only takes energy away.
 pub const AIR_DRAG: f32 = 0.6;
-/// Water drag on a submerged bone (N per m^3/s^2 of length x width): the same
-/// law as the air's, with a much thicker medium (about a third of half the
-/// water's density over the air's: water resists motion across a bone far
-/// more than a body's own bones resist air). A bone's sideways motion pays
-/// the full price, its lengthwise motion `WATER_ALONG` of it, so a stroke that
-/// pushes water sideways has a net reaction and a reciprocal stroke does not
-/// cancel itself (a fish tail). The push is limited like the air's.
+/// Water drag on a submerged bone (kg/m^3): the same law as the air's, in a
+/// much thicker medium. The value is a fifth of half the water's density
+/// (1,000 kg/m^3). The drag scales with the share of the bone under water. A
+/// bone's sideways motion pays the full price and its lengthwise motion
+/// `WATER_ALONG` of it. So a stroke that pushes water sideways has a net
+/// reaction, and a reciprocal stroke does not cancel itself (a fish tail).
+/// The push is limited like the air's.
 pub const WATER_DRAG: f32 = 100.0;
 /// The share of `WATER_DRAG` a bone meets moving along its own length.
 pub const WATER_ALONG: f32 = 0.25;
-/// A fully submerged node feels this share of its weight as buoyancy.
+/// A fully submerged node feels this share of its weight as buoyancy. A node
+/// partly under water feels it times the submerged share of its diameter.
 pub const WATER_BUOYANCY: f32 = 0.7;
-/// Contact tolerance for the behavior metrics (m), as the current engine.
+/// How far (m) above its resting height on the ground a node may be and still
+/// count as touching the ground in the behavior metrics.
 pub(crate) const CONTACT_SLACK: f32 = 0.002;
-/// Height (m) above the ground at which a lifted node is considered airborne.
+/// How far (m) above its resting height on the ground a node must be to count
+/// as lifted in the behavior metrics.
 pub(crate) const LIFT_CLEARANCE: f32 = 0.01;
 
 /// One muscle's constants.
