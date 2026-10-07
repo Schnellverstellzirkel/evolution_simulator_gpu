@@ -423,7 +423,8 @@ pub fn out_of_memory(error: &anyhow::Error) -> bool {
 }
 
 /// What the GPU engine thread needs from a device. `CudaEngine` implements
-/// it; tests use a fake that can run out of memory.
+/// it, and tests use a fake that can run out of memory. It is not
+/// `scheduler::Device`, which holds an `Engine` and its bookkeeping.
 trait Device {
     /// Standard units that can be submitted now.
     fn free_slots(&self) -> usize;
@@ -439,9 +440,14 @@ trait Device {
         batches: &mut Vec<creature_kernel::LaneBatch>,
         cfg: &Config,
     ) -> Result<u64>;
+    /// Returns the oldest submission that has finished, waiting up to
+    /// `timeout` for one.
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>>;
-    /// Frees buffers kept for reuse by slots with nothing in flight.
+    /// Frees buffers kept for reuse by slots with nothing in flight and
+    /// returns the bytes freed.
     fn release_idle(&mut self) -> u64;
+    /// Bytes of device and host buffers the device holds, buffers kept for
+    /// reuse included.
     fn allocated_bytes(&self) -> u64;
     /// Whether a replay can be recorded now.
     fn replay_free(&self) -> bool;
@@ -491,7 +497,8 @@ struct PackedUnit {
     batches: Vec<creature_kernel::LaneBatch>,
 }
 
-/// A unit on the GPU: its ticket and how many creatures it holds.
+/// A unit on the GPU: its `Engine` ticket and how many creatures it holds.
+/// `run_units` keeps it with the device's ticket for the submission.
 struct RunningUnit {
     ticket: u64,
     count: usize,
@@ -508,27 +515,35 @@ enum OutOfMemory {
     GiveUp(Duration),
 }
 
-/// Rides out failed GPU memory allocations instead of failing the GPU,
-/// which would stop evolution. Another process
-/// can hold GPU memory for a while. While other units run, a unit that does
-/// not fit waits for one of them to finish, and fewer units run at once from
-/// then on; one more is tried every `RAISE_AFTER`. With nothing running, it
-/// retries every `pause` for up to `limit`.
+/// Rides out failed GPU memory allocations instead of failing the GPU, which
+/// would stop evolution. Another process can hold GPU memory for a while.
+/// While other units run, a unit that does not fit waits for one of them to
+/// finish. Fewer units run at once from then on, and one more is tried every
+/// `RAISE_AFTER`. With nothing running, it retries every `pause` for up to
+/// `limit`.
 struct MemoryBackoff {
+    /// Units in flight at once when memory is not short.
     slots: usize,
     /// Units allowed in flight at once.
     cap: usize,
+    /// When `cap` may rise by one, while it is below `slots`.
     raise_at: Option<Instant>,
     /// When a submission first failed with nothing in flight, until one succeeds.
     stalled_since: Option<Instant>,
+    /// No submission before this time, after a failure with nothing in flight.
     retry_at: Option<Instant>,
+    /// Whether the line about waiting for memory has been printed.
     waiting_announced: bool,
+    /// Whether the line about running fewer units at once has been printed.
     short_announced: bool,
+    /// How long to wait between retries when nothing is running.
     pause: Duration,
+    /// How long a shortage may last with nothing running before the GPU fails.
     limit: Duration,
 }
 
 impl MemoryBackoff {
+    /// How long `cap` stays low before one more unit is tried.
     const RAISE_AFTER: Duration = Duration::from_secs(10);
 
     fn new(slots: usize, pause: Duration, limit: Duration) -> Self {
@@ -546,6 +561,7 @@ impl MemoryBackoff {
     }
 
     /// Whether another unit may be submitted now, with `in_flight` running.
+    /// When it is time, it first raises `cap` by one.
     fn may_submit(&mut self, now: Instant, in_flight: usize) -> bool {
         if self.cap < self.slots && self.raise_at.is_some_and(|at| now >= at) {
             self.cap += 1;
@@ -555,7 +571,8 @@ impl MemoryBackoff {
     }
 
     /// A submission failed for lack of memory with `in_flight` units still
-    /// running, after idle slots freed `freed` bytes of cached buffers.
+    /// running, after idle slots freed `freed` bytes of cached buffers. It
+    /// says what to do with the unit.
     fn out_of_memory(&mut self, now: Instant, in_flight: usize, freed: u64) -> OutOfMemory {
         if in_flight > 0 {
             // Running units hold memory this one needs: wait for them.
@@ -592,7 +609,8 @@ impl MemoryBackoff {
         OutOfMemory::Retry(line)
     }
 
-    /// A submission succeeded; `in_flight` units now run.
+    /// A submission succeeded and `in_flight` units now run. Returns a line
+    /// to print when memory is back, if there is one.
     fn submitted(&mut self, now: Instant, in_flight: usize) -> Option<String> {
         self.retry_at = None;
         let mut lines = Vec::new();
@@ -623,7 +641,8 @@ impl MemoryBackoff {
 
 /// Opens the NVIDIA GPU named `name` on its own thread, with kernels for
 /// bodies up to `max_nodes` nodes. The thread packs the next unit while
-/// earlier units run on the GPU.
+/// earlier units run on the GPU. The call returns once the device has opened,
+/// or with the error that kept it from opening.
 pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
@@ -653,6 +672,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
                 }
             };
             let name = engine.name.clone();
+            // The standard slots and the confirmation slot run at once.
             let memory = MemoryBackoff::new(
                 slots + 1,
                 Duration::from_millis(500),
@@ -688,7 +708,8 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
     })
 }
 
-/// Packs a job into the buffers of finished units (`spare`) where it can.
+/// Packs every creature of a job into the buffers of finished units (`spare`)
+/// where it can. `indices` is scratch space.
 fn pack_unit(
     ticket: u64,
     unit: Arc<Population>,
@@ -707,7 +728,11 @@ fn pack_unit(
 }
 
 /// The GPU engine thread: packs jobs, runs each as one whole-trial
-/// submission, and returns finished units until the job channel closes.
+/// submission, and returns finished units until the job channel closes. It
+/// also records the replays that arrive on `replays` and waits out memory
+/// shortages with `memory`. After an error it sends that error to `done_tx`
+/// and returns. `name` starts the lines it prints, and `allocated` receives
+/// the bytes the engine holds.
 fn run_units<D: Device>(
     mut engine: D,
     name: &str,
@@ -957,31 +982,37 @@ fn run_units<D: Device>(
     }
 }
 
-/// A replay being recorded: its device ticket, where the answer goes, and
-/// the body's node count, node stride and trial length.
+/// A replay being recorded: its device ticket, where the answer goes, the
+/// layout of its frames and the trial length.
 struct InFlightReplay {
     ticket: u64,
     reply: mpsc::Sender<Result<Recording, String>>,
     layout: FrameLayout,
+    /// Steps of the trial, the settling steps included. The recording has
+    /// `total + 1` frames.
     total: u32,
 }
 
-/// How one recorded frame is laid out (`creature_kernel::frame_stride`): the
-/// body's `nodes` positions at the start of `stride` slots, then, when
-/// `stride` is longer than `capacity`, an (energy, force) pair per muscle and
-/// a (normal, friction) contact force per node, and last the bits of the
-/// broken joints. The kernel numbers nodes so
-/// that bone `j` ends at node `j + 1`; `order[k]` is the creature's own number
-/// of kernel node `k`, as in `physics2::Model`.
+/// How one recorded frame is laid out (`creature_kernel::frame_stride`). A
+/// frame is `stride` slots of `[f32; 2]`. The first `capacity` slots hold the
+/// kernel's node positions, and the body fills the first `order.len()` of
+/// them. Then come an (energy, force) pair per muscle and a (normal,
+/// friction) contact force per node. The last slot holds the bits of the
+/// broken joints. The kernel numbers nodes so that bone `j` ends at node
+/// `j + 1`, and `order[k]` is the creature's own number of kernel node `k`,
+/// as in `physics2::Model`.
 struct FrameLayout {
     order: Vec<usize>,
+    /// Slots for node positions at the start of a frame.
     capacity: usize,
+    /// Muscles of the body.
     muscles: usize,
+    /// Slots in a frame.
     stride: usize,
 }
 
 /// Packs a replay request's creature and queues its recording. Returns the
-/// device ticket, the frame layout and the trial length.
+/// device ticket, the frame layout and the trial length in steps.
 fn start_recording<D: Device>(
     engine: &mut D,
     request: &ReplayRequest,
@@ -1008,8 +1039,10 @@ fn start_recording<D: Device>(
     Ok((ticket, layout, total))
 }
 
-/// The replay in a finished recording: one frame per step and one after the
-/// last, each with the body's node positions.
+/// The `Recording` in a finished replay submission: `total + 1` frames of the
+/// body's node positions in the creature's own numbering, the scored result,
+/// and the forces when the frames carry them. It fails when the device
+/// returned no result, no frames or too few.
 fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Recording, String> {
     let FrameLayout {
         order,
