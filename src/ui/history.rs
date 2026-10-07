@@ -1,5 +1,8 @@
-//! The History tab: the trend chart, the list of records, the body types through
-//! the generations, and the numbers of the generation picked with the slider.
+//! The History tab. It has the generation slider, the trend chart, the list of
+//! records and the body types through the generations. Below those it shows the
+//! picked generation: its diversity, its distances, its body types and its
+//! worst, median and best creature. `central_panel` in `ui.rs` calls
+//! `App::history`.
 
 use super::{
     App, Tab,
@@ -9,13 +12,15 @@ use super::{
     text::{number, species_name},
     widgets::{color_dot, species_color},
 };
-use crate::theme::GAP_M;
+use crate::{storage::Stats, theme::GAP_M};
 use eframe::egui::{self, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 impl App {
-    /// Every record, newest first: generation, distance, species and the
-    /// world it was set in, with a Replay button. Records count again after
-    /// each world change, like the feed and the chart.
+    /// The Records list, newest first. A row has the generation, the distance,
+    /// the species name, the world the record was set in and a Replay button.
+    /// The first row is the running generation's record, when `live_record`
+    /// finds one. Records count again after each world change, like the feed
+    /// and the chart.
     fn records_list(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;
@@ -112,9 +117,10 @@ impl App {
             self.replay_history_holder(index);
         }
     }
-    /// Body plans and effective clades of the global archive at generation
-    /// `index` of the history, with their trace over the last 100
-    /// generations.
+    /// The body plans, the effective clades and the median plan age of the
+    /// global archive at row `index` of the history, as one line of text. A
+    /// small chart beside it traces the plans and the clades over at most 100
+    /// rows ending at `index`. Each trace is scaled to its own highest value.
     fn diversity_meter(&self, ui: &mut egui::Ui, index: usize) {
         let theme = self.theme();
         let Some(snapshot) = self.snapshot.as_ref() else {
@@ -148,7 +154,7 @@ impl App {
             ] {
                 let top = values.iter().copied().fold(1.0f32, f32::max);
                 let n = values.len().max(2) - 1;
-                let points: Vec<egui::Pos2> = values
+                let points: Vec<Pos2> = values
                     .iter()
                     .enumerate()
                     .map(|(k, v)| {
@@ -158,11 +164,16 @@ impl App {
                         )
                     })
                     .collect();
-                painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+                painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
             }
         });
     }
-    /// Stacked visualization of body type distribution across generations.
+    /// The chart of the body types through the generations: one column per
+    /// generation, and in each column one band per body type, as tall as that
+    /// type's share of the row's `species_total`. With more generations than
+    /// points of width, each column shows the first generation of a group. A
+    /// line marks the picked generation, and a click on the chart picks the
+    /// generation under the pointer.
     fn species_history(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;
@@ -188,11 +199,7 @@ impl App {
         let stride = history.len().div_ceil(rect.width().max(1.) as usize).max(1);
         for i in (0..history.len()).step_by(stride) {
             let h = &history[i];
-            let body_count = if h.archive_cells > 0 {
-                h.archive_cells
-            } else {
-                h.population
-            };
+            let body_count = species_total(h);
             let x = rect.left() + rect.width() * i as f32 / history.len() as f32;
             let right = rect.left()
                 + rect.width() * (i + stride).min(history.len()) as f32 / history.len() as f32;
@@ -226,6 +233,10 @@ impl App {
             ));
         }
     }
+    /// The whole tab. With no history yet it shows a short note. Otherwise the
+    /// slider picks a row of the history, and Follow latest keeps it on the
+    /// newest row. A replay started here selects the creature and switches to
+    /// the Overview tab.
     pub(super) fn history(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.snapshot else { return };
         let theme = self.theme();
@@ -253,12 +264,10 @@ impl App {
         self.records_list(ui);
         ui.add_space(GAP_M);
         self.species_history(ui);
+        // A copy, so the rest of the tab can call methods that borrow `self`
+        // mutably while it reads these numbers.
         let stats = self.snapshot.as_ref().unwrap().history[self.history_index].clone();
-        let body_count = if stats.archive_cells > 0 {
-            stats.archive_cells
-        } else {
-            stats.population
-        };
+        let body_count = species_total(&stats);
         ui.horizontal(|ui| {
             ui.label(format!(
                 "Generation {} · {} creatures tried · {} creatures kept in {} ways of moving",
@@ -305,6 +314,9 @@ impl App {
         });
         ui.add_space(GAP_M);
         if let Some((n, m)) = picked_type {
+            // The cards are the whole archive as of the last request, not as it
+            // was at the picked generation. When they hold no creature of this
+            // body type, ask the worker for fresh ones and replay nothing.
             let best = self.cards.as_ref().and_then(|list| {
                 list.cards
                     .iter()
@@ -321,6 +333,8 @@ impl App {
                 None => self.request_cards(),
             }
         }
+        // `representatives` holds the worst, median and best creature, in that
+        // order.
         let mut selection = None;
         ui.columns(3, |cols| {
             for (i, ui) in cols.iter_mut().enumerate() {
@@ -342,5 +356,15 @@ impl App {
             self.select(c, stats.config);
             self.tab = Tab::Overview;
         }
+    }
+}
+/// The total that the body type counts of a history row are shares of: the
+/// elites the archive kept, or the population when the row has no archive
+/// cells.
+fn species_total(stats: &Stats) -> usize {
+    if stats.archive_cells > 0 {
+        stats.archive_cells
+    } else {
+        stats.population
     }
 }
