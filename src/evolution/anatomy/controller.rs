@@ -439,7 +439,7 @@ mod tests {
         let mut applied = 0;
         for (i, body) in bodies.iter().enumerate() {
             let mut c = body.clone();
-            let cx = Context { donor: None };
+            let cx = Context::of(None);
             if op(&mut c, &cfg, &mut Rng::new(41, 0, i), &cx) {
                 applied += 1;
                 assert_eq!((&c.nodes, &c.bones), (&body.nodes, &body.bones));
@@ -624,7 +624,7 @@ mod tests {
         let cfg = Config::default();
         let mut kept = 0;
         for (i, mut c) in grown().into_iter().enumerate() {
-            let cx = Context { donor: None };
+            let cx = Context::of(None);
             if !limb_clock_ratio(&mut c, &cfg, &mut Rng::new(5, 0, i), &cx) {
                 continue;
             }
@@ -645,7 +645,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .filter_map(|(i, mut c)| {
-                let cx = Context { donor: None };
+                let cx = Context::of(None);
                 limb_clock_ratio(&mut c, &cfg, &mut Rng::new(9, 0, i), &cx).then_some(c)
             })
             .collect();

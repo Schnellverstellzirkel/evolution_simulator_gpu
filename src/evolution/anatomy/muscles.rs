@@ -569,7 +569,7 @@ mod tests {
             for variant in 0..2u32 {
                 let mut c = body.clone();
                 let mut rng = Rng::new(21, variant, i);
-                let cx = Context { donor: None };
+                let cx = Context::of(None);
                 if op(&mut c, &cfg, &mut rng, &cx) {
                     applied += 1;
                     assert!(c.muscles.len() <= cfg.max_muscles);
@@ -655,7 +655,7 @@ mod tests {
         assert!(applied > 0, "applied {applied}");
         // A split muscle can always fuse back.
         let cfg = Config::default();
-        let cx = Context { donor: None };
+        let cx = Context::of(None);
         for (i, mut c) in bodies(&cfg, 40).into_iter().enumerate() {
             let mut rng = Rng::new(22, 0, i);
             if !split_muscle(&mut c, &cfg, &mut rng, &cx) {

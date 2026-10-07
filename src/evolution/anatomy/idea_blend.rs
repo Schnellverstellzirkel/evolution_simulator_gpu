@@ -51,7 +51,7 @@ fn step(rng: &mut Rng) -> f32 {
 /// line to the donor's muscle at the same index, by one common step
 /// (Vassiliades and Mouret 2018).
 fn isoline_timing_step(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.muscles.len().min(d.muscles.len());
     if n == 0 {
         return false;
@@ -74,7 +74,7 @@ fn isoline_timing_step(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Cont
 
 /// Node sizes and grips take half of the way to the donor's.
 fn donor_surfaces(c: &mut Creature, cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.nodes.len().min(d.nodes.len());
     let mut changed = false;
     for i in 1..n {
@@ -96,7 +96,7 @@ fn donor_surfaces(c: &mut Creature, cfg: &Config, _rng: &mut Rng, cx: &Context) 
 
 /// Joint ranges take half of the way to the donor's, bone by bone.
 fn donor_ranges(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.bones.len().min(d.bones.len());
     let mut changed = false;
     // The neck (bone 0 at the head) keeps its range.
@@ -111,7 +111,7 @@ fn donor_ranges(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -
 
 /// Tendons are copied from the donor's muscles at the same index.
 fn donor_tendons(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.muscles.len().min(d.muscles.len());
     let mut changed = false;
     for i in 0..n {
@@ -122,7 +122,7 @@ fn donor_tendons(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) 
 
 /// Organs take the donor's masses and places, bone by bone.
 fn donor_organs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.bones.len().min(d.bones.len());
     let mut changed = false;
     for i in 0..n {
@@ -141,7 +141,7 @@ fn donor_organs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -
 /// The ratio of each muscle's short stroke to its long stroke becomes the
 /// donor's, with the muscle's own long stroke kept.
 fn donor_stroke_ratio(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.muscles.len().min(d.muscles.len());
     let mut changed = false;
     for i in 0..n {
@@ -158,7 +158,7 @@ fn donor_stroke_ratio(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Cont
 
 /// Duty cycles are copied from the donor's muscles at the same index.
 fn donor_duty_profile(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let n = c.muscles.len().min(d.muscles.len());
     let mut changed = false;
     for i in 0..n {
@@ -171,7 +171,7 @@ fn donor_duty_profile(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Cont
 /// place in the donor's leg order (legs ordered from the first to the last
 /// bone index), all bones of the leg scaling together.
 fn donor_leg_lengths(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     let (mine, theirs) = (leaf_limbs(c), leaf_limbs(d));
     let n = mine.len().min(theirs.len());
     if n == 0 {
@@ -197,7 +197,7 @@ fn donor_leg_lengths(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Contex
 /// The mean period of the body moves to the donor's, every period scaled by
 /// the same factor so the ratios among clocks stay.
 fn donor_tempo(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
-    let Some(d) = cx.donor else { return false };
+    let Some(d) = cx.donor() else { return false };
     if c.muscles.is_empty() || d.muscles.is_empty() {
         return false;
     }

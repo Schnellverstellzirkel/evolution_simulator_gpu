@@ -475,7 +475,7 @@ mod tests {
     use crate::evolution::{Muscle, NO_SENSOR, Population, repair};
 
     fn cx() -> Context<'static> {
-        Context { donor: None }
+        Context::of(None)
     }
 
     /// Runs `op` on a copy of each body and returns the changed copies with

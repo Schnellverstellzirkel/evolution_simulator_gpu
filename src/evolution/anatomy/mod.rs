@@ -18,8 +18,12 @@
 //!   the neck. `repair` runs after it (in `offspring`), which clamps
 //!   genes, restores canonical order and the muscle ring, and lines the nodes
 //!   up with the bone lengths.
-use super::{Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, bone_point};
+use super::{
+    Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, StoredCreature,
+    bone_point,
+};
 use crate::config::Config;
+use std::cell::OnceCell;
 
 mod compound;
 mod controller;
@@ -57,10 +61,41 @@ pub(super) type Children = [BoneIds; MAX_NODES];
 /// Lists of bones, one per limb.
 pub(super) type Limbs = Bounded<BoneIds, MAX_NODES>;
 
-/// What an operator may use besides the creature.
+/// What an operator may use besides the creature: another archive elite,
+/// for operators that graft from a second body.
 pub(super) struct Context<'a> {
-    /// Another archive elite, for operators that graft from a second body.
-    pub donor: Option<&'a Creature>,
+    body: Option<&'a Creature>,
+    /// Or the elite's genes, unpacked into the cell the first time an
+    /// operator reads them: most operators never do.
+    genes: Option<(&'a StoredCreature, &'a OnceCell<Creature>)>,
+}
+
+impl<'a> Context<'a> {
+    /// A context with `donor` as the body to graft from.
+    pub(super) const fn of(donor: Option<&'a Creature>) -> Self {
+        Self {
+            body: donor,
+            genes: None,
+        }
+    }
+    /// A context whose donor is unpacked from `donor` into `cell` when an
+    /// operator first reads it.
+    pub(super) fn of_genes(
+        donor: Option<&'a StoredCreature>,
+        cell: &'a OnceCell<Creature>,
+    ) -> Self {
+        Self {
+            body: None,
+            genes: donor.map(|genes| (genes, cell)),
+        }
+    }
+    /// The donor body, if there is one.
+    pub(super) fn donor(&self) -> Option<&'a Creature> {
+        self.body.or_else(|| {
+            self.genes
+                .map(|(genes, cell)| cell.get_or_init(|| genes.unpack()))
+        })
+    }
 }
 
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
@@ -195,7 +230,7 @@ const SHARED_SLOT: &[&str] = &[
 /// Grafts a limb of `donor` onto `c` (`graft_donor_limb`), for crossover
 /// between different body plans.
 pub(super) fn graft_from(c: &mut Creature, cfg: &Config, rng: &mut Rng, donor: &Creature) -> bool {
-    let cx = Context { donor: Some(donor) };
+    let cx = Context::of(Some(donor));
     limbs::graft_donor_limb(c, cfg, rng, &cx)
 }
 /// The controller operators (`controller.rs`) share a second pick slot. With a
@@ -681,9 +716,7 @@ mod tests {
                     for variant in 0..2u32 {
                         let mut c = body.clone();
                         let mut rng = Rng::new(13, index as u32 + 1000 * variant, i);
-                        let cx = Context {
-                            donor: Some(&donor),
-                        };
+                        let cx = Context::of(Some(&donor));
                         if !apply(index, &mut c, &cfg, &mut rng, &cx) {
                             continue;
                         }
@@ -724,9 +757,7 @@ mod tests {
         let donor = bodies[20].clone();
         for (index, (name, _)) in OPERATORS.iter().enumerate() {
             for (i, body) in bodies.iter().enumerate() {
-                let cx = Context {
-                    donor: Some(&donor),
-                };
+                let cx = Context::of(Some(&donor));
                 let (mut x, mut y) = (body.clone(), body.clone());
                 let a = apply(index, &mut x, &cfg, &mut Rng::new(61, index as u32, i), &cx);
                 let b = apply(index, &mut y, &cfg, &mut Rng::new(61, index as u32, i), &cx);
@@ -783,7 +814,7 @@ mod tests {
                     let mut c = body.clone();
                     let mut rng = Rng::new(29, index as u32 + 1000 * variant, i);
                     let donor = &bodies[(i + 1 + variant as usize) % bodies.len()];
-                    let cx = Context { donor: Some(donor) };
+                    let cx = Context::of(Some(donor));
                     if !apply(index, &mut c, &cfg, &mut rng, &cx) {
                         continue;
                     }
@@ -802,7 +833,7 @@ mod tests {
             let mut rng = Rng::new(31, 0, i);
             for _ in 0..100 {
                 let donor = &bodies[rng.index(bodies.len())];
-                let cx = Context { donor: Some(donor) };
+                let cx = Context::of(Some(donor));
                 let index = rng.index(OPERATORS.len());
                 if apply(index, &mut c, &cfg, &mut rng, &cx) {
                     c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.1);
@@ -834,7 +865,7 @@ mod tests {
             let mut rng = Rng::new(17, 0, i);
             for step in 0..200 {
                 let donor = &bodies[rng.index(bodies.len())];
-                let cx = Context { donor: Some(donor) };
+                let cx = Context::of(Some(donor));
                 let index = rng.index(OPERATORS.len());
                 if !apply(index, &mut c, &cfg, &mut rng, &cx) {
                     continue;

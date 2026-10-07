@@ -190,9 +190,7 @@ mod tests {
                 for variant in 0..2u32 {
                     let mut c = body.clone();
                     let mut rng = Rng::new(29, variant, i);
-                    let cx = Context {
-                        donor: Some(&donor),
-                    };
+                    let cx = Context::of(Some(&donor));
                     let said = op(&mut c, &cfg, &mut rng, &cx);
                     let changed =
                         c.nodes != body.nodes || c.bones != body.bones || c.muscles != body.muscles;

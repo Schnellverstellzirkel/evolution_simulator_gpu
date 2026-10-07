@@ -2143,15 +2143,14 @@ fn structural_mutation_among(
     // 2011): a graft then brings the most new structure.
     let size = |c: &Creature| c.nodes.len() as i32 * 4 + c.muscles.len() as i32;
     let own = size(creature);
-    let donor_body = (!donors.is_empty()).then(|| {
+    let donor = (!donors.is_empty()).then(|| {
         (0..4)
             .map(|_| &donors[rng.index(donors.len())].creature)
             .max_by_key(|d| (d.node_count() as i32 * 4 + d.muscle_count() as i32 - own).abs())
             .expect("four draws")
-            .unpack()
     });
-    let donor = donor_body.as_ref();
-    let cx = anatomy::Context { donor };
+    let donor_body = std::cell::OnceCell::new();
+    let cx = anatomy::Context::of_genes(donor, &donor_body);
     let classic = CLASSIC_COUNT;
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
@@ -2223,7 +2222,7 @@ pub fn apply_structural_operator(
         classic_operator(pick, creature, cfg, rng)
     } else {
         let index = anatomy::OPERATORS.iter().position(|(n, _)| *n == name)?;
-        let cx = anatomy::Context { donor };
+        let cx = anatomy::Context::of(donor);
         anatomy::apply(index, creature, cfg, rng, &cx)
     };
     if changed {

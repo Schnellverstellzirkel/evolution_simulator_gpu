@@ -299,7 +299,7 @@ pub(crate) fn reshape_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     true
 }
 
-/// Copies a branch of `cx.donor` (another archive elite) onto a node of this
+/// Copies a branch of `cx.donor()` (another archive elite) onto a node of this
 /// body, with the donor's joints, internal muscles and their timing. With
 /// even odds it replaces a branch of this body instead of adding one.
 pub(crate) fn graft_donor_limb(
@@ -308,7 +308,7 @@ pub(crate) fn graft_donor_limb(
     rng: &mut Rng,
     cx: &Context,
 ) -> bool {
-    let Some(donor) = cx.donor else {
+    let Some(donor) = cx.donor() else {
         return false;
     };
     let Some(graft) = pick(&limb_roots(donor), rng) else {
@@ -404,9 +404,7 @@ mod tests {
         let cfg = Config::default();
         let bodies = bodies(&cfg, 80);
         let donor = bodies[40].clone();
-        let cx = Context {
-            donor: Some(&donor),
-        };
+        let cx = Context::of(Some(&donor));
         let mut count = 0;
         for (i, body) in bodies.iter().enumerate() {
             let mut c = body.clone();
@@ -590,7 +588,7 @@ mod tests {
             added >= 8 && replaced >= 8,
             "added {added}, replaced {replaced} of 80"
         );
-        let cx = Context { donor: None };
+        let cx = Context::of(None);
         let mut c = donor.clone();
         assert!(!graft_donor_limb(&mut c, &cfg, &mut Rng::new(1, 0, 0), &cx));
     }

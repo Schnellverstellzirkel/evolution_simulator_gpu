@@ -471,7 +471,7 @@ mod tests {
             let mut applied = 0;
             for (i, body) in bodies(&cfg, 160).into_iter().enumerate() {
                 let mut c = body.clone();
-                let cx = Context { donor: None };
+                let cx = Context::of(None);
                 if op(&mut c, &cfg, &mut Rng::new(71, 0, i), &cx) {
                     applied += 1;
                     assert_eq!(c.nodes, body.nodes, "{name}");

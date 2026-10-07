@@ -480,7 +480,7 @@ mod tests {
         for (i, body) in bodies(&cfg, 160).into_iter().enumerate() {
             let mut c = body.clone();
             let mut rng = Rng::new(21, 0, i);
-            let cx = Context { donor: None };
+            let cx = Context::of(None);
             if op(&mut c, &cfg, &mut rng, &cx) {
                 applied += 1;
                 check(&body, &c);

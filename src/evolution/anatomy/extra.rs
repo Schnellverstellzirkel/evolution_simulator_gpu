@@ -702,7 +702,7 @@ mod tests {
         let mut applied = 0;
         for (i, body) in bodies.iter().enumerate() {
             let mut c = body.clone();
-            let cx = Context { donor: None };
+            let cx = Context::of(None);
             if op(&mut c, &cfg, &mut Rng::new(31, 0, i), &cx) {
                 applied += 1;
                 assert!(c.nodes.len() <= cfg.max_nodes && c.muscles.len() <= cfg.max_muscles);

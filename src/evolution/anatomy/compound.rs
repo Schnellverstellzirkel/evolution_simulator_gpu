@@ -712,7 +712,7 @@ pub(crate) fn transplant_limb_program(
     rng: &mut Rng,
     cx: &Context,
 ) -> bool {
-    let Some(donor) = cx.donor else {
+    let Some(donor) = cx.donor() else {
         return false;
     };
     // Limbs by number of bones, the donor's only when they have a program.
@@ -764,7 +764,7 @@ pub(crate) fn transplant_gait(
     _rng: &mut Rng,
     cx: &Context,
 ) -> bool {
-    let Some(donor) = cx.donor else {
+    let Some(donor) = cx.donor() else {
         return false;
     };
     let (mine, theirs) = (limbs_front_to_back(c), limbs_front_to_back(donor));
@@ -1245,7 +1245,7 @@ mod tests {
         let mut applied = 0;
         for (i, body) in bodies.iter().enumerate() {
             let mut c = body.clone();
-            let cx = Context { donor: None };
+            let cx = Context::of(None);
             if op(&mut c, &cfg, &mut Rng::new(41, 0, i), &cx) {
                 applied += 1;
                 assert!(c.nodes.len() <= cfg.max_nodes && c.muscles.len() <= cfg.max_muscles);
@@ -1480,9 +1480,7 @@ mod tests {
         let mut applied = 0;
         for (i, body) in all.iter().enumerate() {
             let mut c = body.clone();
-            let cx = Context {
-                donor: Some(&donor),
-            };
+            let cx = Context::of(Some(&donor));
             if transplant_limb_program(&mut c, &cfg, &mut Rng::new(47, 0, i), &cx) {
                 applied += 1;
                 assert_eq!(c.bones, body.bones);
@@ -1550,9 +1548,7 @@ mod tests {
         let mut applied = 0;
         for (i, body) in all.iter().enumerate() {
             let mut c = body.clone();
-            let cx = Context {
-                donor: Some(&donor),
-            };
+            let cx = Context::of(Some(&donor));
             if transplant_gait(&mut c, &cfg, &mut Rng::new(57, 0, i), &cx) {
                 applied += 1;
                 assert_eq!(c.bones, body.bones);
