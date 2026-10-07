@@ -704,7 +704,7 @@ impl App {
                 // before the worker read the click must not put the panel back
                 // (autochange would flip to Off).
                 let acknowledged = worlds_match(
-                    &next.pending.clone().unwrap_or_else(|| next.config.clone()),
+                    next.pending.as_ref().unwrap_or(&next.config),
                     &self.config,
                 );
                 sent.elapsed() > Duration::from_secs(if acknowledged { 2 } else { 15 })
@@ -1129,19 +1129,8 @@ impl App {
                 {
                     self.screenshot_waiting = false;
                     if let Some(generation) = self.capture_generation.take() {
-                        let path = format!("runs/progress-gen{generation}.png");
-                        let bytes: Vec<u8> =
-                            image.pixels.iter().flat_map(|p| p.to_array()).collect();
                         let _ = std::fs::create_dir_all("runs");
-                        if let Err(e) = image::save_buffer(
-                            &path,
-                            &bytes,
-                            image.size[0] as u32,
-                            image.size[1] as u32,
-                            image::ColorType::Rgba8,
-                        ) {
-                            eprintln!("Screenshot: {e}");
-                        }
+                        write_png(&format!("runs/progress-gen{generation}.png"), &image);
                         continue;
                     }
                     match save_screenshot(&image, std::path::Path::new("runs")) {
@@ -1152,16 +1141,7 @@ impl App {
                         Err(error) => self.message = Some(format!("Screenshot failed: {error}")),
                     }
                 } else if let Some(path) = self.capture_path.clone() {
-                    let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
-                    if let Err(e) = image::save_buffer(
-                        &path,
-                        &bytes,
-                        image.size[0] as u32,
-                        image.size[1] as u32,
-                        image::ColorType::Rgba8,
-                    ) {
-                        eprintln!("Screenshot: {e}");
-                    }
+                    write_png(&path, &image);
                     let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
                     frames.sort_by(f32::total_cmp);
                     let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.) * 1000.;
@@ -1313,6 +1293,19 @@ impl eframe::App for App {
         {
             self.bench_work.push(seconds);
         }
+    }
+}
+/// Writes `image` to `path` as a PNG. A failure goes to stderr and no further.
+fn write_png(path: &str, image: &egui::ColorImage) {
+    let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+    if let Err(e) = image::save_buffer(
+        path,
+        &bytes,
+        image.size[0] as u32,
+        image.size[1] as u32,
+        image::ColorType::Rgba8,
+    ) {
+        eprintln!("Screenshot: {e}");
     }
 }
 /// PCI vendor of the GPU GNOME's compositor renders on: the card tagged
