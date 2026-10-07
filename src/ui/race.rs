@@ -14,9 +14,10 @@ use super::{
 use crate::{
     physics,
     theme::{
-        GAP_L, Theme,
-        scene::{FALLEN, GROUND_INK},
+        GAP_L, HudLine, Theme, hud_block,
+        scene::{FALLEN, GRID, GROUND_INK, HUD, HUD_DIM, HUD_INK},
     },
+    worker::CardList,
 };
 use eframe::egui::{self, Align2, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::time::Duration;
@@ -76,17 +77,14 @@ impl App {
                 playback: Playback::new(creature.clone(), config.clone()),
             });
         }
-        lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
-        self.race = lanes;
-        self.race_pending = false;
-        self.race_camera = 0.0;
+        self.fill_race(lanes);
     }
     /// Starts the race with the first five cards of a ranked archive that have
     /// a descriptor and a finite score. It changes nothing when no card does.
     /// `absorb_snapshot` calls it when a list arrives, if the race is waiting
     /// and the player has no picks.
-    pub(super) fn build_top_race(&mut self, list: &crate::worker::CardList) {
-        let mut lanes: Vec<RaceLane> = list
+    pub(super) fn build_top_race(&mut self, list: &CardList) {
+        let lanes: Vec<RaceLane> = list
             .cards
             .iter()
             .filter(|card| card.descriptor.is_some() && card.score.is_finite())
@@ -99,12 +97,16 @@ impl App {
                 },
             })
             .collect();
-        // The lanes go in order of the distance their replays end at, best
-        // first. The live standings end in the same order.
-        lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
         if lanes.is_empty() {
             return;
         }
+        self.fill_race(lanes);
+    }
+    /// Fills the race with `lanes`, the farthest finisher first, so the live
+    /// standings end in the order of the lanes. The race stops waiting and the
+    /// camera goes back to the start.
+    fn fill_race(&mut self, mut lanes: Vec<RaceLane>) {
+        lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
         self.race = lanes;
         self.race_pending = false;
         self.race_camera = 0.0;
@@ -301,11 +303,12 @@ impl App {
         // street. The ground line sits 16 px above the bottom of the strip.
         let ground = lane_rect.bottom() - 16.;
         let lane_painter = painter.with_clip_rect(lane_rect);
-        let lane_config = &lane.playback.config;
+        let playback = &lane.playback;
+        let lane_config = &playback.config;
         // The replay clock in seconds moves the sky, so a paused race holds
         // still. Each lane adds 900 px per lane index to the backdrop's
         // camera, so neighboring lanes show different skylines.
-        let clock = lane.playback.tick as f32 / physics::rate() as f32;
+        let clock = playback.tick as f32 / physics::rate() as f32;
         crate::world_fx::backdrop(
             &lane_painter,
             lane_rect,
@@ -348,7 +351,7 @@ impl App {
             );
             lane_painter.line_segment(
                 [Pos2::new(px, lane_rect.top()), Pos2::new(px, ground)],
-                Stroke::new(1., crate::theme::scene::GRID),
+                Stroke::new(1., GRID),
             );
             // Only the first lane carries the meter labels.
             if i == 0 {
@@ -369,7 +372,6 @@ impl App {
         // The world's origin on screen: x = 0 is the start line and y = 0 is
         // the ground.
         let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
-        let playback = &lane.playback;
         let marks = FrameMarks::of(playback);
         draw_creature(
             &lane_painter,
@@ -409,43 +411,25 @@ impl App {
         distances: &[f32],
     ) {
         let playback = &lane.playback;
-        use crate::theme::{
-            HudLine, hud_block,
-            scene::{HUD, HUD_DIM},
-        };
+        let ink = if is_leader { HUD } else { HUD_INK };
         hud_block(
             lane_painter,
             lane_rect.left_top() + Vec2::splat(6.),
             Align2::LEFT_TOP,
             &[
                 HudLine::text(
-                    format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
+                    format!("{}. {}", i + 1, species_name(&playback.creature)),
                     15.,
-                    if is_leader {
-                        HUD
-                    } else {
-                        crate::theme::scene::HUD_INK
-                    },
+                    ink,
                 ),
                 HudLine::text(
-                    format!(
-                        "finishes at {:.2} m · {}",
-                        lane.playback.distance, lane.label
-                    ),
+                    format!("finishes at {:.2} m · {}", playback.distance, lane.label),
                     12.,
                     HUD_DIM,
                 ),
             ],
         );
-        let mut right = vec![HudLine::value(
-            format!("{:.2} m", distances[i]),
-            18.,
-            if is_leader {
-                HUD
-            } else {
-                crate::theme::scene::HUD_INK
-            },
-        )];
+        let mut right = vec![HudLine::value(format!("{:.2} m", distances[i]), 18., ink)];
         if playback.fallen().is_some() {
             right.push(HudLine::text(
                 playback.ending.short().to_owned(),
