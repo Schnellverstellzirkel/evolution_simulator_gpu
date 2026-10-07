@@ -321,11 +321,6 @@ pub fn ground(
         // Wet ground darkens with a bright film. Ice glazes over it.
         let s = (slip - 0.3) / 0.7;
         let ice = slip > 0.9;
-        let color = if ice {
-            (200, 222, 234)
-        } else {
-            (120, 150, 166)
-        };
         if !ice {
             // Wet: the ground darkens, a bright film runs along it, and puddles
             // with slow ripples lie on it, one in every 1.3 m of ground.
@@ -368,6 +363,7 @@ pub fn ground(
                 );
             }
         } else {
+            let color = (200, 222, 234);
             band(
                 painter,
                 &line,
@@ -969,7 +965,6 @@ pub fn ground_body(
         Color32::from_white_alpha(28),
         Color32::TRANSPARENT,
     );
-    let _ = gradient;
 }
 
 /// A convex polygon filled with the texture `art`, tinted by `tint`, `tile`
@@ -1073,14 +1068,14 @@ pub fn structures(
                 // The left wall hangs from the left lip's height and the right
                 // wall from the right lip's. A pit under one and a half walls
                 // wide on screen uses the right lip for both.
-                let top = if x0 < lip_b.x - wall * 1.5 {
+                let wall_top = if x0 < lip_b.x - wall * 1.5 {
                     lip_a.y
                 } else {
                     lip_b.y
                 };
                 crate::theme::tiled(
                     painter,
-                    Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, floor)),
+                    Rect::from_min_max(Pos2::new(x0, wall_top), Pos2::new(x1, floor)),
                     Art::Rust,
                     Vec2::splat((0.8 * ppm).max(8.0)),
                     Vec2::new(k as f32 * 0.37, 0.0),
