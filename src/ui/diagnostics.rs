@@ -1,5 +1,7 @@
-//! Developer aids: the bar shown while a measurement pauses the game, and the
-//! diagnostics drawer under the status line.
+//! Developer aids. `App::dev_pause_bar` draws the bar that shows while a
+//! developer measurement pauses the game (`dev_pause`). `App::diagnostics`
+//! fills the drawer under the status line that the Diagnostics button opens.
+//! `directory_bytes` sizes the `runs/` directory for that drawer.
 
 use super::{
     App,
@@ -16,8 +18,11 @@ use std::{
 };
 
 impl App {
-    /// A bar across the window while a developer measurement pauses the
-    /// game (`dev_pause`), with the time left and Resume now.
+    /// A bar along the bottom of the window while a developer measurement
+    /// pauses the game (`dev_pause`). First it says that the last creatures
+    /// finish their trials. Once the engines are closed it counts down to the
+    /// latest end of the pause. The Resume now button ends the pause early.
+    /// Nothing is drawn when no pause is on.
     pub(super) fn dev_pause_bar(&self, ui: &mut egui::Ui) {
         let Some(view) = self.worker.dev_pause.view() else {
             return;
@@ -52,11 +57,18 @@ impl App {
                     }
                 });
             });
+        // Redraw twice a second so the countdown keeps moving.
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
-    /// The closed-by-default drawer with search and machine numbers, and the
-    /// step-by-step run buttons developers use.
+    /// The Diagnostics drawer under the status line, closed until the player
+    /// opens it. The first line is about the run (GPU, seed, state, progress,
+    /// trials in confirmation), the second about the search (QD score, niches,
+    /// reserves, the emitter shares of the next batch) and the third about the
+    /// machine (frame time, rate, memory, size of `runs/`). One line for each
+    /// evaluation engine follows. The One generation button runs a single
+    /// generation while evolution is not running.
     pub(super) fn diagnostics(&self, ui: &mut egui::Ui, s: &Snapshot) {
+        // The 95th percentile of the recent frame times, in seconds.
         let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
         frames.sort_by(f32::total_cmp);
         let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
@@ -107,7 +119,9 @@ impl App {
         });
     }
 }
-/// Total size of the files under a directory, ignoring unreadable entries.
+/// Total size in bytes of the files under `root` and its subdirectories. An
+/// entry it cannot read counts as 0, so a missing `root` gives 0. It does not
+/// follow links: a link counts by its own size.
 pub(super) fn directory_bytes(root: &std::path::Path) -> u64 {
     let mut total = 0u64;
     let mut stack = vec![root.to_path_buf()];
