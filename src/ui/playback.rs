@@ -380,29 +380,18 @@ impl FrameMarks {
     /// caller turns it on. The developer switch `EVOLUTION_SMOKE_ENERGY` sets
     /// the energy of every muscle, for screenshots.
     pub(super) fn of(playback: &Playback) -> Self {
+        let tick = playback.tick as usize;
+        // The list of one frame out of a list per frame, empty when the frame
+        // has none.
+        let at = |per_frame: &[Vec<f32>]| per_frame.get(tick).cloned().unwrap_or_default();
         let mut marks = Self {
             time: playback.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
             fallen: playback.fallen().is_some(),
             contact: vec![false; playback.nodes.len()],
             broken: vec![false; playback.nodes.len()],
-            energy: playback
-                .forces
-                .energy
-                .get(playback.tick as usize)
-                .cloned()
-                .unwrap_or_default(),
-            muscle_force: playback
-                .forces
-                .muscle
-                .get(playback.tick as usize)
-                .cloned()
-                .unwrap_or_default(),
-            ground_force: playback
-                .forces
-                .ground
-                .get(playback.tick as usize)
-                .cloned()
-                .unwrap_or_default(),
+            energy: at(&playback.forces.energy),
+            muscle_force: at(&playback.forces.muscle),
+            ground_force: at(&playback.forces.ground),
             arrows: false,
         };
         // Developer screenshots: `EVOLUTION_SMOKE_ENERGY=0.15` draws every muscle at that store.
@@ -412,7 +401,7 @@ impl FrameMarks {
         {
             marks.energy.fill(level);
         }
-        if let Some(frame) = playback.frames.get(playback.tick as usize) {
+        if let Some(frame) = playback.frames.get(tick) {
             node_contact(
                 &playback.nodes,
                 frame,
@@ -422,12 +411,7 @@ impl FrameMarks {
             );
             broken_nodes(
                 &playback.creature,
-                playback
-                    .forces
-                    .broken
-                    .get(playback.tick as usize)
-                    .copied()
-                    .unwrap_or(0),
+                playback.forces.broken.get(tick).copied().unwrap_or(0),
                 &mut marks.broken,
             );
         }
