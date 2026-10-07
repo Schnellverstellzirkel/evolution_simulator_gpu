@@ -7,8 +7,8 @@
 //!   replay_match <save> --retest <count> <out.csv>
 //!
 //! scores the global archive's best `count` elites together at the standard
-//! physics with the early screen off. An early rung rule of the save can still
-//! stop a trial. It writes one CSV row per elite with the columns
+//! physics with the early screen and the early rungs off, so each one runs a
+//! full trial. It writes one CSV row per elite with the columns
 //! `id,archive,fine,distance,fall_time`. `archive` is the stored score. `fine`
 //! is 1 when that score came from a confirmation trial. `distance` is the
 //! re-test distance. `fall_time` is the time of the fall in seconds, or 0 when
@@ -56,6 +56,7 @@ fn retest(path: &str, count: usize, out: &str) -> Result<()> {
     let creatures: Vec<_> = elites.iter().map(|e| e.creature.unpack()).collect();
     let cfg = evolution_simulator::config::Config {
         screen: None,
+        rungs: None,
         ..experiment.config.clone()
     };
     let results = common::score_creatures(&mut engine, &creatures, &cfg)?;

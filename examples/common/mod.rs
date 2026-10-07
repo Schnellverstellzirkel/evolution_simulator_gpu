@@ -81,12 +81,13 @@ pub fn score_creatures(
 }
 
 /// Records one creature's full trial with the scoring kernel. It removes the
-/// early screen from `cfg` and leaves `cfg.rungs` as it is. The frames run at
-/// the trial's own fidelity, one per step, and the first ones show the start
-/// pose during the settling steps. Call `open` first and keep its engine alive.
+/// early screen and the early rungs from `cfg`, as `engine::replay` does. The
+/// frames run at the trial's own fidelity, one per step. Call `open` first and
+/// keep its engine alive.
 pub fn record(creature: &Creature, cfg: &Config) -> Result<Recording> {
     let cfg = Config {
         screen: None,
+        rungs: None,
         population: 1,
         ..cfg.clone()
     };
