@@ -369,7 +369,6 @@ pub(super) fn toast(ctx: &egui::Context, theme: Theme, include_startup: bool) {
         let startup = crate::loading::progress(Group::Startup);
         progress.running.extend(startup.running);
         progress.queued += startup.queued;
-        progress.done += startup.done;
     }
     let Some((label, took)) = progress.running.first() else {
         return;
