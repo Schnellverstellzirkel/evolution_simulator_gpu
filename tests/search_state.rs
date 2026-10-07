@@ -229,8 +229,8 @@ fn behavior_archive_keeps_exactly_the_fastest_creature_in_each_cell() {
                     .sum::<f64>()
             );
         }
-        // Loading a checkpoint rebuilds these indices; the same insertion rule
-        // must continue to hold afterward.
+        // Loading a checkpoint rebuilds these indices. The same insertion rule
+        // must hold afterward.
         archive.rebuild_indices();
     }
     // A score that is not a distance leaves the archive untouched.
@@ -348,7 +348,8 @@ fn an_archive_keeps_one_elite_per_way_of_moving_until_it_is_refined() {
     // The three bodies share one way of moving, and the fastest keeps it.
     assert_eq!(climbing.behavior_count(), 1);
     assert_eq!(climbing.entries[0].fitness, 3.0);
-    // Refined, the same elites take the cells of their body classes.
+    // In a refined archive the fastest elite and a slower one of another body
+    // class each keep a cell.
     let mut refined = QdArchive::default();
     refined.set_refined(true);
     let slower = Elite {
@@ -397,9 +398,12 @@ fn island_migration_never_duplicates_a_cell_or_replaces_a_faster_elite() {
     }
 }
 
-// Synthetic results isolate search state from the physics engine and make these
-// regression tests cheap. The score follows the generation and the birth
-// slot, and every island receives several distinct cadence cells.
+/// An evaluator for `Experiment::step` that returns made-up results. It keeps
+/// these tests away from the physics engine, so they run fast. A creature's
+/// distance is `10 + generation + slot`, where `slot` is the ring slot it was
+/// born in. Its gait cadence changes every `storage::island_count()` slots, so
+/// the slots of a main island fall in more than one cadence cell. The other
+/// behavior values are the same for every creature.
 fn synthetic(
     generation: u32,
 ) -> impl FnMut(&Population, &Config) -> anyhow::Result<Vec<EvaluationMetrics>> {
@@ -460,8 +464,9 @@ fn assert_same_archive(a: &QdArchive, b: &QdArchive) {
         encoded(&a.entries) == encoded(&b.entries),
         "archive elites differ"
     );
-    // Rebuilding an empty archive sums no scores, producing -0.0 rather than
-    // Default's +0.0. They represent the same score and search state.
+    // Rebuilding the indices of an empty archive sums no scores, which gives
+    // -0.0 where `Default` gives +0.0. The two are equal as floats and mean the
+    // same score.
     assert_eq!(a.qd_score, b.qd_score);
     assert_eq!(a.behavior_count(), b.behavior_count());
     assert_eq!(a.morphology_count(), b.morphology_count());
@@ -595,7 +600,8 @@ fn the_island_reserves_breed_and_count_their_visits() {
 #[test]
 fn a_record_is_confirmed_and_keeps_the_lower_score() {
     let mut experiment = Experiment::new(config(38)).unwrap();
-    // The confirmation trial finds half the standard distance.
+    // A confirmation trial runs at fine fidelity and finds half the standard
+    // distance. `confirmed` counts the creatures that ran one.
     let mut confirmed = 0;
     experiment
         .step(&mut |pop, cfg| {
@@ -610,8 +616,8 @@ fn a_record_is_confirmed_and_keeps_the_lower_score() {
         })
         .unwrap();
     assert!(confirmed > 0, "the first block sets records");
-    // Every island record is a confirmed score: it lies below any
-    // unconfirmed standard score of its island.
+    // Every island record is a confirmed score, and no unconfirmed standard
+    // score of its island is above it.
     for island in &experiment.islands[..storage::island_count()] {
         let Some(best) = island
             .entries
@@ -768,9 +774,11 @@ fn checkpoint_preserves_stalled_island_optimizer() {
     .unwrap();
     run_synthetic(&mut uninterrupted);
     run_synthetic(&mut uninterrupted);
-    // Advance the record age past the 30-generation optimizer rotation without
-    // spending 30 generations evaluating bodies. The archived scores and CMA
-    // state remain valid; the loaded ring must use the same alternate design.
+    // Make every island record 39 generations old. An optimizer turns to its
+    // next fastest design after 30 generations without a record, and this gets
+    // there without evaluating that many generations of bodies. The archived
+    // scores and CMA state stay valid. The loaded ring must use the same
+    // alternate design.
     uninterrupted.generation = 40;
     uninterrupted.history.clear();
     uninterrupted.island_progress = uninterrupted
@@ -821,8 +829,9 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
         storage::save(&checkpoint.0, &experiment).unwrap();
         assert!(storage::load(&checkpoint.0).is_err());
     }
-    // No planning pass has run yet after loading a save or after an empty
-    // island receives its first elite. Both forms are valid resume states.
+    // A save made before the first planning pass has no records, and an island
+    // that holds no elite has the record negative infinity. Both are valid
+    // resume states.
     for progress in [Vec::new(), vec![(f32::NEG_INFINITY, 0); islands]] {
         experiment.island_progress = progress;
         storage::save(&checkpoint.0, &experiment).unwrap();
@@ -847,8 +856,9 @@ fn a_save_from_the_previous_cell_layout_loads_with_every_elite_in_its_new_cell()
     for _ in 0..3 {
         run_synthetic(&mut experiment);
     }
-    // As the previous version saved them: the niche has no shape or size
-    // class, and the global archive and every island hold one elite per cell.
+    // As a save from before version 54 holds them: the niche has no shape or
+    // size class, and the global archive and every island hold one elite per
+    // cell.
     let old_layout = |archive: &mut QdArchive| {
         let mut seen = std::collections::HashSet::new();
         archive.entries.retain_mut(|elite| {
@@ -942,8 +952,8 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
 }
 
 /// An archive at its plateau: one elite for every way of moving, all at the
-/// same distance, with bodies of every shape and size. Each keeps the cell of
-/// the layout before the body classes.
+/// same distance, with bodies of two shapes and two sizes. Each sits in the
+/// cell of `Descriptor::movement_niche`, the layout before the body classes.
 fn plateau_archive() -> QdArchive {
     archive_of_all_ways_of_moving(|_| 1000.0)
 }
@@ -987,7 +997,7 @@ fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
                         gait_frequency: (cadence as f32 + 0.5) * 0.75,
                         mean_height,
                         feet: feet as f32,
-                        // Bodies of both shapes and sizes.
+                        // Two shapes and two sizes of body.
                         nodes: if n.is_multiple_of(2) { 6 } else { 16 },
                         aspect_ratio: if n.is_multiple_of(3) { 0.8 } else { 3.0 },
                         ..Descriptor::default()
@@ -1018,7 +1028,7 @@ fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
 fn an_island_is_refined_when_its_archive_is_old_enough() {
     use evolution_simulator::qd;
     let mut experiment = Experiment::new(config(38)).unwrap();
-    // The global archive never breeds, so it starts refined; an island climbs
+    // The global archive never breeds, so it starts refined. An island climbs
     // without classes.
     assert!(experiment.archive.refined());
     run_synthetic(&mut experiment);
@@ -1032,11 +1042,9 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
     }
     run_synthetic(&mut experiment);
     assert_eq!(experiment.generation, qd::REFINE_AFTER);
-    // Island 0 and the hub moved to the cells of their body classes (the other
-    // isolated islands follow 10 generations apart). A wild island never
-    // refines: it keeps one elite per way of moving (`refine_archives`).
-    // The elites of other shapes and sizes sit in cells of their own, and
-    // none was lost.
+    // Island 0 and the hub moved to the cells of their body classes. The other
+    // isolated islands follow 10 generations apart. `refine_archives` never
+    // refines a wild island, which keeps one elite per way of moving.
     for (index, island) in experiment.islands[..storage::island_count()]
         .iter()
         .enumerate()
@@ -1047,7 +1055,9 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
             "island {index}"
         );
     }
-    // (A nursery's cohort may take cells of body classes that were empty.)
+    // The elites of other shapes and sizes sit in cells of their own, and none
+    // was lost. A nursery's cohort may take cells of body classes that were
+    // empty.
     assert!(experiment.islands[0].behavior_count() >= before);
     assert_eq!(experiment.islands[0].movement_count(), before);
     assert!(
@@ -1133,9 +1143,9 @@ fn a_save_of_an_older_version_leaves_every_island_coarse_until_it_is_old_enough(
     // refined.
     assert!(!restored.islands[2].refined() && restored.archive.refined());
     assert_eq!(restored.islands[2].behavior_count(), 1440);
-    // The game had run for 30 generations when it was saved, so its islands
-    // are refined at the next generation boundary.
-    // Island 2 refines 20 generations after island 0.
+    // A loaded game counts the age of its islands from generation 0. Island 2
+    // refines 20 generations after island 0, so the game is set to that age.
+    // The islands that are old enough refine at the next generation boundary.
     restored.generation = evolution_simulator::qd::REFINE_AFTER + 20;
     restored.history.truncate(restored.generation as usize);
     run_synthetic(&mut restored);
@@ -1165,9 +1175,10 @@ fn a_parent_of_a_rare_clade_is_preferred_when_the_elites_are_level() {
             })
             .count()
     };
-    // Eight elites meet in a tournament, so a given one is drawn about 8 in
-    // 1,440 times at random and almost every time it meets the others when
-    // its clade is rare.
+    // A tournament has eight candidates drawn at random. Among level elites
+    // the winner is a random candidate, so a given elite wins about 1 draw in
+    // 1,440. With the rarity bonus it wins every tournament it joins, which is
+    // about 8 draws in 1,440.
     const { assert!(qd::RARITY_WEIGHT > 0.0) };
     let level = draws(&[]);
     let rare = draws(&rarity);
@@ -1221,7 +1232,7 @@ fn a_world_change_checkpoint_retests_the_same_elites() {
     let mut changed = uninterrupted.config.clone();
     changed.gravity += 1.0;
     uninterrupted.update_config_now(changed).unwrap();
-    // The main islands start over; the wild islands keep their own worlds.
+    // The main islands start over. The wild islands keep their own worlds.
     assert!(main_islands_empty(&uninterrupted));
     assert!(!uninterrupted.reseed.is_empty());
 
@@ -1245,7 +1256,7 @@ fn a_world_change_checkpoint_retests_the_same_elites() {
 fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     run_synthetic(&mut experiment);
-    // Island 1 and the global archive are refined, the other islands are not.
+    // Island 1 and the global archive are refined. The other islands are not.
     let mut refined = plateau_archive();
     refined.set_refined(true);
     refined.rebin();
@@ -1255,9 +1266,9 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     let mut changed = experiment.config.clone();
     changed.gravity += 1.0;
     experiment.update_config_now(changed).unwrap();
-    // Every archive is empty and keeps its layout, the nurseries of new
-    // random bodies are coarse and the nurseries of reshaped bodies refined.
-    // The elites of island 1 wait to be tested again.
+    // Every archive of the main islands is empty and keeps its layout. The
+    // nurseries of new random bodies are coarse and the nurseries of reshaped
+    // bodies are refined. The elites of island 1 wait to be tested again.
     assert_eq!(experiment.islands.len(), storage::arena_count());
     for (arena, island) in experiment.islands.iter().enumerate() {
         if evolution_simulator::qd::is_wild(arena % storage::island_count()) {
@@ -1295,7 +1306,8 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
         }
     }
     experiment.validate().unwrap();
-    // Without a refined archive the islands start empty, as they always did.
+    // With no refined island archive the main islands still start empty, and
+    // the global archive stays refined.
     let mut plain = Experiment::new(config(38)).unwrap();
     run_synthetic(&mut plain);
     let mut changed = plain.config.clone();
@@ -1410,13 +1422,14 @@ fn an_island_migration_is_recorded_and_summarized() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     run_synthetic(&mut experiment);
     assert!(experiment.last_migration.is_none());
-    // The generation before a migration boundary.
+    // Set the generation to the one before a migration boundary, so the next
+    // run ends on it.
     experiment.generation = storage::MIGRATION_INTERVAL - 1;
     run_synthetic(&mut experiment);
     let (generation, exchange) = experiment.last_migration.clone().unwrap();
     assert_eq!(generation, storage::MIGRATION_INTERVAL);
     assert_eq!(exchange.len(), storage::island_count());
-    // Every isolated island sends to the hub; the hub sends nothing.
+    // Every isolated island sends to the hub. The hub sends nothing.
     for (island, &(sent, kept)) in exchange.iter().enumerate() {
         if island == storage::hub_island() {
             assert_eq!((sent, kept), (0, 0));
@@ -1474,8 +1487,8 @@ fn isolated_islands_only_hold_their_own_descendants() {
     })
     .unwrap();
     let hub = storage::hub_island();
-    // After a world change an island holds its elites tested again, a graduate
-    // among them without its mark.
+    // After a world change an island holds its elites tested again. A graduate
+    // among them comes back without its mark.
     let check = |experiment: &Experiment, reseeded: bool| {
         for (arena, island) in experiment.islands.iter().enumerate() {
             // A nursery belongs to one island like the island's archive.
@@ -1484,10 +1497,10 @@ fn isolated_islands_only_hold_their_own_descendants() {
                 continue;
             }
             for elite in &island.entries {
-                // Only nursery slots fill the nursery of new bodies (the
+                // Only nursery slots fill the nursery of new bodies. The
                 // nursery of reshaped bodies also takes the new body plans
-                // that island slots bred), and an island archive holds
-                // nursery bodies only as marked graduates.
+                // that island slots bred. An island archive holds nursery
+                // bodies only as marked graduates.
                 let slot = evolution::slot_of_id(elite.creature.id);
                 let nursery_slot =
                     evolution_simulator::qd::is_nursery_slot(slot, storage::island_count());
@@ -1498,9 +1511,10 @@ fn isolated_islands_only_hold_their_own_descendants() {
                 } else if !elite.graduate && !reseeded {
                     assert!(!nursery_slot);
                 }
-                // The elite and every recorded ancestor were born here, or,
-                // from generation 50, on the island before it in the ring of
-                // stepping stones.
+                // The elite and every recorded ancestor were born here. From
+                // generation 50 an isolated island may also hold creatures
+                // born on another isolated island, because a stepping stone
+                // carries one elite to the next island of the ring.
                 let isolated = storage::ISOLATED_ISLANDS;
                 let born_ok = |born: usize| {
                     born == index
@@ -1509,10 +1523,11 @@ fn isolated_islands_only_hold_their_own_descendants() {
                             && born < isolated
                             && born != hub)
                 };
-                // Walk the chain by the ids that key the lineage records. A
-                // record keeps its genes only for the chains the lineage tab
-                // shows (`prune_lineage`), and the others hold an empty
-                // creature with id 0, which reads as born on island 0.
+                // Walk the chain by the ids of the lineage map, not by the
+                // creature in each record. `prune_lineage` keeps the genes of
+                // a record only for the chains the lineage tab shows. The
+                // others hold an empty creature with id 0, which reads as born
+                // on island 0.
                 let chain = experiment.ancestry_ids(elite.creature.id, usize::MAX);
                 assert_eq!(
                     chain.len(),
