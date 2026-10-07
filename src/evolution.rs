@@ -1515,6 +1515,8 @@ pub fn random_block(cfg: &Config, first: usize, count: usize) -> Population {
 /// Ring slots have fewer than 2^24 places, so a bred creature's id holds its
 /// breeding round and its slot, and no two bred creatures share an id.
 const SLOT_BITS: u32 = 24;
+/// The top bit of a bred creature's id. A random creature's id is its slot
+/// plus 1, which never has it.
 const BRED: u64 = 1 << 63;
 /// Id of the child bred for ring `slot` in breeding round `round`.
 pub fn bred_id(round: u64, slot: usize) -> u64 {
@@ -1529,31 +1531,40 @@ pub fn slot_of_id(id: u64) -> usize {
     }
 }
 
+/// How to breed one child. `storage` plans each child of a ring block, and
+/// `breed_child` follows the plan.
 #[derive(Clone, Copy, Debug)]
 pub struct CandidatePlan {
-    /// Search operator that breeds this child.
+    /// The emitter that breeds this child.
     pub emitter: Emitter,
     /// Elite index of the primary parent in `archive`.
     pub parent: Option<usize>,
     /// CMA-ES emitter index for this child.
     pub cma: Option<usize>,
-    /// Second archive parent with the same body plan, for crossover.
+    /// Second archive parent, if any, for a structural or novelty child. If
+    /// its nodes, bones and muscle pairs match the parent's, the two are
+    /// crossed over. If its body plan differs, one of its limbs is grafted
+    /// onto a copy of the parent instead (`mated`).
     pub mate: Option<usize>,
     /// The parent and the mate are elites of the slot's island, not of the
     /// archive the slot breeds for: a reshaped child for a nursery.
     pub seed: bool,
 }
 
-/// The growth-step body rule (the owner's decision of 2026-10-01): a child gains at most this many nodes and muscles
-/// over its parent, so bodies grow by steps rather than jumps. In a
-/// generation-50 dump 4% of archive entrants had jumped further.
+/// The growth-step body rule (the owner's decision of 2026-10-01): a child
+/// gains at most this many nodes and muscles over its parent, so bodies grow
+/// by steps rather than jumps. In a generation-50 dump 4% of archive entrants
+/// had jumped further.
 pub const GROWTH_STEP: Option<GrowthStep> = Some(GrowthStep {
     nodes: 4,
     muscles: 4,
 });
+/// How many nodes and muscles a child may gain over its parent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GrowthStep {
+    /// Most nodes a child may add.
     pub nodes: usize,
+    /// Most muscles a child may add.
     pub muscles: usize,
 }
 
@@ -1583,10 +1594,12 @@ fn child_limits_for(
     })
 }
 
-/// What breeding did to one child, for `examples/breed_bench.rs`.
+/// What breeding did to one child. `Population::breed` logs its operator,
+/// and `examples/breed_bench.rs` groups its timings by both fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ChildTrace {
-    /// The child went through `structural_mutation_from`.
+    /// The child went through `structural_mutation_among`, whether or not an
+    /// operator changed its body.
     pub structural: bool,
     /// The structural operator that changed it, as an index into
     /// `structural_operator_names`.
@@ -1724,14 +1737,18 @@ struct Variation<'a> {
     bias: u64,
 }
 
-/// Each island favours its own 8 operator pick slots, drawn twice as often,
-/// like species with different mutation biases (Cantu-Paz, 2000). Every
-/// operator stays in every island.
+/// The operator bias of `island`, which picks the island's favoured operator
+/// slots. A quarter of the island's operator picks come from its 8 favoured
+/// slots (`structural_mutation_among`), like species with different mutation
+/// biases (Cantu-Paz, 2000). The other picks are uniform over all the slots,
+/// so every operator stays in every island.
 fn island_bias(seed: u64, island: usize) -> u64 {
     (seed ^ 0x6269_6173).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (island as u64 + 1)
 }
 
-/// The plan's parent, crossed with its mate when it has one, into `child`.
+/// Writes the plan's parent into `child`. With a mate, the two are crossed
+/// over if they have the same shape. Otherwise one of the mate's limbs is
+/// grafted onto the parent, in up to four tries.
 fn mated(
     archive: &QdArchive,
     plan: CandidatePlan,
@@ -1761,8 +1778,9 @@ fn mated(
     }
 }
 
-/// Whether two creatures have the same nodes, bones and muscle pairs, so
-/// `crossover` can pair their genes.
+/// Whether two creatures have the same number of nodes, the same bone
+/// endpoints and the same muscle bone pairs, so `cross_onto` can pair their
+/// genes one to one.
 fn same_shape(a: &Creature, b: &Creature) -> bool {
     a.nodes.len() == b.nodes.len()
         && a.bones.len() == b.bones.len()
@@ -1983,6 +2001,8 @@ impl ArenaPart<'_> {
 /// Genome slots written by parallel tasks, each at its own block position.
 #[derive(Clone, Copy)]
 struct GenomeOut(*mut Genome);
+// SAFETY: the tasks of `Population::breed` write distinct positions, and
+// nothing else touches the genome vector while they run.
 unsafe impl Send for GenomeOut {}
 unsafe impl Sync for GenomeOut {}
 
@@ -1996,9 +2016,10 @@ impl Population {
     /// breeding to the next, so its memory is allocated and touched once.
     /// Every run of `BREED_CHUNK` children gets a part of the arena sized
     /// from the genes the same positions held last time (from `hint` when
-    /// this population held no block of this size), plus a quarter, and
-    /// writes each child there as soon as it is bred. A child that does not
-    /// fit goes after all parts. Returns how many children went there.
+    /// this population held no block of this size), plus a quarter and 256
+    /// genes of each kind, and writes each child there as soon as it is bred.
+    /// A child that does not fit goes after all parts. Returns how many
+    /// children went there.
     #[allow(clippy::too_many_arguments)]
     pub fn breed(
         &mut self,
