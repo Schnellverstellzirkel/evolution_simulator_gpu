@@ -1,22 +1,20 @@
-//! Gait operators: posture: the trunk carried clear of the ground, feet under the load.
+//! Gait operators for posture: they carry the trunk clear of the ground and put
+//! the feet under the load. The operators of this file share one pick slot
+//! (`GAIT_FILES` in `mod.rs`) and are compound, so each is a whole change to
+//! the body and its child gets no parameter noise.
 //!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
+//! The sources are Alexander (1977 and after: straight, vertical legs cut the
+//! muscle force needed to stand), Full and Koditschek (1999: a spring-mass body
+//! over legs that stand under the centre of mass), Sims (1994) and Lipson and
+//! Pollack (2000: evolved walkers had to learn to stand before they walked),
+//! Cheney et al. (2013: the bodies that moved far were low and regular) and
+//! Hildebrand (limb loading: heavy organs in the trunk and light feet, because
+//! a light foot swings fast and costs little to move).
 //!
-//! The sources are Alexander (1977 and after: mammals carry the body on
-//! straight, vertical legs, which cuts the muscle force needed to stand and
-//! lets the duty factor fall as speed rises), Full and Koditschek (1999,
-//! templates and anchors: a spring-mass body over legs that stand under the
-//! centre of mass), Sims (1994) and Lipson and Pollack (2000, whose evolved
-//! walkers had to learn to stand before they walked) and Cheney et al. (2013,
-//! where the bodies that moved far were low and regular). Mammals also
-//! carry the heavy organs in the trunk and keep the feet light (Hildebrand's
-//! limb loading), because a light foot swings fast and costs little to move.
-//!
-//! Joint angles are measured from the starting pose, so an operator that turns
-//! a limb in the starting pose also shifts the joint's range by the same angle
-//! (`pose_turn`). The stops stay where they were in the world and only the
-//! pose the creature starts in changes.
+//! A joint's range is measured from the starting pose, so `pose_turn` shifts it
+//! by the angle it turns the pose and the stops stay where they were in the
+//! world.
+
 use super::junctions::{keep_strokes, spans, turn_branch};
 use super::limbs::clamped;
 use super::rhythm::{foot, hip, leaf_limbs};
@@ -39,12 +37,13 @@ fn wrap(mut a: f32) -> f32 {
     a
 }
 
-/// One of `items`, or none when empty.
+/// One of `items` at random, or none when `items` is empty. It always takes one
+/// draw from `rng`, even when `items` is empty. `limbs::pick` takes none then.
 fn choose<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
     items.get(rng.index(items.len().max(1))).copied()
 }
 
-/// The direction of bone `b` in the pose, counterclockwise from +x.
+/// The direction of bone `b` in the starting pose, counterclockwise from +x.
 fn heading(c: &Creature, b: usize) -> f32 {
     let (p, q) = (
         c.nodes[c.bones[b].a as usize],
@@ -53,13 +52,18 @@ fn heading(c: &Creature, b: usize) -> f32 {
     (q.y - p.y).atan2(q.x - p.x)
 }
 
-/// Legs with a foot: leaf limbs of at least two bones.
+/// Legs with a foot: leaf limbs of at least two bones, each as a list of its
+/// bones from the hip down.
 fn feet_legs(c: &Creature) -> Vec<BoneIds> {
     leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect()
 }
 
-/// Turns the branch of bone `j` by `t` in the starting pose and moves the
-/// joint's range by the same angle, so its stops stay where they were.
+/// Turns the branch of bone `j` by `t` radians, counterclockwise, in the
+/// starting pose and moves the joint's range by the same angle, so its stops
+/// stay where they were. Then `Bone::clamp_range` keeps the range valid: if
+/// the turn puts the new pose outside the old range, the nearer stop moves onto
+/// the pose. The body is lifted if a node would end below the ground
+/// (`turn_branch`).
 fn pose_turn(c: &mut Creature, j: usize, t: f32) {
     turn_branch(c, j, t);
     let bone = &mut c.bones[j];
@@ -97,7 +101,9 @@ fn scale_leg(c: &mut Creature, leg: &[usize], k: f32) -> bool {
     true
 }
 
-/// Mass-weighted centre of the body in the starting pose: nodes and organs.
+/// Mass-weighted centre of the body in the starting pose: all nodes, the head
+/// too, and the organs. Bone and muscle mass is left out. `organ_center` is
+/// another point: it skips the head and the organs.
 fn centre_of_mass(c: &Creature) -> [f32; 2] {
     let mut sum = [0.0f32; 2];
     let mut mass = 0.0f32;
@@ -116,7 +122,7 @@ fn centre_of_mass(c: &Creature) -> [f32; 2] {
     [sum[0] / mass.max(1e-6), sum[1] / mass.max(1e-6)]
 }
 
-/// Bones that are in no leg: the trunk, the neck and the tips that are not feet.
+/// Bones in no leg: the trunk, the neck and the tips that are not feet.
 fn trunk_bones(c: &Creature) -> BoneIds {
     let legs = feet_legs(c);
     (0..c.bones.len())
@@ -126,7 +132,8 @@ fn trunk_bones(c: &Creature) -> BoneIds {
 
 /// Adds `amount` of organ mass to bone `to`. A new organ sits at `at`. An
 /// organ already there moves to the mass-weighted mean of its place and `at`,
-/// so the pooled mass keeps its centre.
+/// so the pooled mass keeps its centre. The caller checks that the bone has
+/// room for `amount` (`MAX_ORGAN_MASS`).
 fn pool_organ(c: &mut Creature, to: usize, amount: f32, at: f32) {
     let bone = &mut c.bones[to];
     bone.organ_at = if bone.organ_mass > 0.0 {
@@ -137,8 +144,10 @@ fn pool_organ(c: &mut Creature, to: usize, amount: f32, at: f32) {
     bone.organ_mass += amount;
 }
 
-/// Scales every leg by `k` (all together, so the legs stay level) and puts
-/// the body back on the ground.
+/// Scales every leg by `k` (all together, so the legs stay level), puts the
+/// body back on the ground and keeps the muscle strokes in proportion
+/// (`keep_strokes`). A leg that `scale_leg` refuses stays as it is. Returns
+/// false when no leg scaled.
 fn scale_all_legs(c: &mut Creature, k: f32) -> bool {
     let legs = feet_legs(c);
     let before = spans(c);
@@ -156,9 +165,10 @@ fn scale_all_legs(c: &mut Creature, k: f32) -> bool {
 
 /// Straightens a knee: turns the part of a leg below one joint until the bone
 /// continues the line of the bone above, with a bend left of at most a third
-/// of the original. A straight leg is a strut, not a lever: it carries the
-/// load through bone and needs little muscle force to hold the trunk up
-/// (Alexander), and it lifts the hip higher over the same bone lengths.
+/// of the original. The joint is picked at random among those with a bend of
+/// 0.15 to 1.5 rad. A straight leg carries the load through bone like a strut,
+/// so it needs little muscle force to hold the trunk up (Alexander), and it
+/// lifts the hip higher over the same bone lengths.
 pub(crate) fn straighten_leg_knee(
     c: &mut Creature,
     _cfg: &Config,
@@ -184,10 +194,12 @@ pub(crate) fn straighten_leg_knee(
 }
 
 /// Turns a whole leg about its hip until the line from hip to foot is
-/// vertical, so the foot stands directly under the hip. The leg keeps its
-/// shape, joint stops and muscles. A foot under the hip puts the ground force
-/// along the leg, where a foot ahead or behind puts a torque on the hip
-/// (Full and Koditschek's anchor: the leg stands under the load).
+/// vertical, so the foot stands directly under the hip. The leg is picked at
+/// random among those whose foot is more than 0.03 m below the hip and that
+/// need a turn of 0.08 to 1.2 rad. The leg keeps its shape, joint stops and
+/// muscles. A foot under the hip puts the ground force along the leg, where a
+/// foot ahead or behind puts a torque on the hip (Full and Koditschek's
+/// anchor: the leg stands under the load).
 pub(crate) fn foot_under_hip(
     c: &mut Creature,
     _cfg: &Config,
@@ -211,12 +223,13 @@ pub(crate) fn foot_under_hip(
     true
 }
 
-/// Moves the hip of a leg whose foot is more than 0.12 m from the body's
-/// centre of mass to the trunk node that brings the foot nearest below that
-/// centre, keeping the leg's shape. Feet under the centre of mass carry the
-/// weight without a pitching torque, while feet far from it have to be braced
-/// by the other legs. The muscles from the leg to the bone above the old hip
-/// move to the bone above the new one.
+/// Moves the hip of a leg whose foot is more than 0.12 m ahead of or behind
+/// the body's centre of mass onto the node outside the legs that brings the
+/// foot nearest below that centre, keeping the leg's shape. The hip moves only
+/// if the foot ends up at least 0.06 m nearer. Feet under the centre of mass
+/// carry the weight without a pitching torque, while feet far from it have to
+/// be braced by the other legs. The muscles between the leg's first bone and
+/// the bone above the old hip move to the bone above the new hip.
 pub(crate) fn hip_toward_mass_centre(
     c: &mut Creature,
     _cfg: &Config,
@@ -279,8 +292,8 @@ pub(crate) fn hip_toward_mass_centre(
 /// joint whose range is off centre by more than 0.08 rad starts at the middle
 /// of its range, and the range is centred on it. The leg then starts in
 /// mid-stance, with room to swing both ways, instead of at one stop where half
-/// of the first stroke is wasted against it. (The pose that `pose_joint_at_stop`
-/// gives is the opposite, a braced one.)
+/// of the first stroke is wasted against it. `pose_joint_at_stop` does the
+/// opposite: it starts a joint near a stop, a braced pose.
 pub(crate) fn centre_leg_rest_angles(
     c: &mut Creature,
     _cfg: &Config,
@@ -329,8 +342,9 @@ pub(crate) fn crouch_legs(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &
     scale_all_legs(c, rng.range(0.75, 0.9))
 }
 
-/// Moves the organ mass of every leg bone into the trunk, onto trunk bones
-/// that can hold an organ and have room for it. A mammal's heavy organs sit in
+/// Moves the organ of each leg bone into the trunk, onto a trunk bone picked at
+/// random among those that can hold an organ and have room for its mass. An
+/// organ with no such bone stays where it is. A mammal's heavy organs sit in
 /// the trunk and its feet are light, and a light foot swings with little
 /// muscle work: the energy of a swing grows with the mass moved.
 pub(crate) fn organs_to_trunk(
@@ -371,10 +385,12 @@ pub(crate) fn organs_to_trunk(
     changed
 }
 
-/// Moves the organ mass of the lower bones of one leg to its first bone, next
-/// to the hip. Mass near the hip adds little to the leg's moment of inertia, so
-/// the swing needs less torque and goes faster (Hildebrand: the muscle mass of
-/// a running limb sits at its top, and the lower bones are light).
+/// Moves the organ mass of the lower bones of one leg to its first bone, as
+/// near the hip as the bone's allowed stretch lets it sit. A lower bone's organ
+/// moves only if the first bone has room for it. Mass near the hip adds little
+/// to the leg's moment of inertia, so the swing needs less torque and goes
+/// faster (Hildebrand: the muscle mass of a running limb sits at its top, and
+/// the lower bones are light).
 pub(crate) fn organs_to_hip(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let center = organ_center(&c.nodes);
     let legs: Vec<BoneIds> = feet_legs(c)
@@ -405,11 +421,13 @@ pub(crate) fn organs_to_hip(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
     changed
 }
 
-/// Moves the highest organ to a lower place that can hold it, at the low end
-/// of that bone's allowed stretch. The body's mass sits lower, so the centre
-/// of mass drops, and a low centre of mass makes the body harder to tip over a
-/// planted foot (an inverted pendulum falls slower the lower its mass). The
-/// total organ mass does not change.
+/// Moves the highest organ to another bone that has room for its mass, onto
+/// whichever end of that bone's allowed stretch is lower, and only to a place
+/// more than 0.04 m lower than the organ was. The bone is picked at random. The
+/// body's mass sits lower, so the centre of mass drops, and a low centre of
+/// mass makes the body harder to tip over a planted foot, because it takes a
+/// bigger lean to carry the centre of mass past the foot. The total organ mass
+/// does not change.
 pub(crate) fn sink_organ_mass(
     c: &mut Creature,
     _cfg: &Config,
@@ -449,9 +467,9 @@ pub(crate) fn sink_organ_mass(
 
 /// Shortens a part that drags: a one-bone tip (a tail or a snout) whose end
 /// lies within 0.12 m of the ground and that is longer than 0.12 m loses 25 to
-/// 55% of its length. A dragging tip rubs the ground and costs friction work
-/// each step, while a short stub lets the body rest on its feet. The tip
-/// keeps its direction, muscles and joint range.
+/// 55% of its length, but never gets shorter than 0.06 m. A dragging tip rubs
+/// the ground and costs friction work each step, while a short stub lets the
+/// body rest on its feet. The tip keeps its direction, muscles and joint range.
 pub(crate) fn shorten_dragging_tip(
     c: &mut Creature,
     _cfg: &Config,
@@ -478,11 +496,12 @@ pub(crate) fn shorten_dragging_tip(
     true
 }
 
-/// Turns the foremost and the rearmost leg outward by 0.1 to 0.3 rad each,
-/// about their hips, so the feet stand wider apart along the trunk than the
-/// hips do. A longer base under the same body resists pitching, the way a
-/// quadruped's front and hind feet plant well apart. A leg that would lean
-/// more than 0.8 rad from vertical does not turn.
+/// Turns the foremost and the rearmost leg outward, each by the same 0.1 to
+/// 0.3 rad about its hip, so the feet stand wider apart along the trunk than
+/// the hips do. A longer base under the same body resists pitching, the way a
+/// quadruped's front and hind feet plant well apart. The two hips must be at
+/// least 0.12 m apart. If either leg would lean more than 0.8 rad from
+/// vertical, neither turns.
 pub(crate) fn widen_stance_fore_aft(
     c: &mut Creature,
     _cfg: &Config,
@@ -517,12 +536,16 @@ pub(crate) fn widen_stance_fore_aft(
     true
 }
 
-/// Bends a leg into the zigzag of a mammal's limb: the first two bones lean
-/// opposite ways, 0.25 to 0.5 rad off vertical, with the foot under the hip.
-/// A leg behind the middle of the body has its knee forward, a leg in front of
-/// it has its knee back, as the hind legs and fore legs of a dog do. The bend
-/// stores the load in the knee like a spring and lets the leg fold up short
-/// during the swing.
+/// Bends a leg into the zigzag of a mammal's limb: the first bone leans 0.25 to
+/// 0.5 rad off vertical and the second leans the other way, by the angle that
+/// puts its end under the hip (the foot, on a leg of two bones). A leg behind
+/// the middle of the body (the mean x of the nodes) has its knee forward, a leg
+/// in front of it has its knee back, as the hind legs and fore legs of a dog
+/// do. The bend stores the load in the knee like a spring and lets the leg fold
+/// up short during the swing. A leg stays as it is when its second bone is too
+/// short to bring the end back under the hip, when the turns it needs are
+/// above 1.2 rad at the hip or 1.5 rad at the knee, or when they add up to
+/// less than 0.1 rad.
 pub(crate) fn zigzag_leg_bend(
     c: &mut Creature,
     _cfg: &Config,
@@ -560,10 +583,12 @@ pub(crate) fn zigzag_leg_bend(
 }
 
 /// Lengthens the leg whose foot hangs highest above the ground until its foot
-/// reaches the ground, scaling it about its hip by 1.05 to 1.8. A foot that
-/// never touches the ground carries no load, so the other legs carry the body
-/// and the body leans on them. A leg that reaches the ground shares the load
-/// and the stride.
+/// reaches the ground, scaling it about its hip by 1.05 to 1.8. It looks only
+/// at legs whose foot is more than 0.08 m above the lowest node and more than
+/// 0.05 m below the hip, and that need a scale in that range. The choice takes
+/// no random draw. A foot that never touches the ground carries no load, so the
+/// other legs carry the body and the body leans on them. A leg that reaches the
+/// ground shares the load and the stride.
 pub(crate) fn ground_hanging_foot(
     c: &mut Creature,
     _cfg: &Config,
