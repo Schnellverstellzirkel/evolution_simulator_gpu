@@ -164,7 +164,7 @@ impl Loop {
         }
         self.changed = true;
     }
-    /// `Command::Save`: shows the "Saving" status and queues the save, which
+    /// `Command::Save`: sets the "Saving" status and queues the save, which
     /// `save_pending` runs at the end of this pass. Without a game it does
     /// nothing.
     pub(super) fn request_save(&mut self, path: PathBuf) {
