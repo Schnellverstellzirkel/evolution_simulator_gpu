@@ -300,9 +300,9 @@ struct App {
     map_sent: bool,
     /// The archive cards the player filters for.
     card_filter: CardFilter,
-    /// The ranked archive on screen in Ways of moving and for the race. It
-    /// changes only when the UI asks the worker for a newer one: when the
-    /// player opens Ways of moving or the Race tab, or presses Show latest.
+    /// The ranked archive that Ways of moving, the Race tab and the History
+    /// tab read. A new list arrives only after `request_cards`, so the cards
+    /// do not move while the player looks.
     cards: Option<crate::worker::CardList>,
     /// When the UI last asked the worker for the ranked archive.
     cards_requested: Option<Instant>,
@@ -1250,8 +1250,9 @@ impl eframe::App for App {
     }
     /// Draws one frame. It first updates the state: the frame record, the
     /// replay, the worker's snapshot, the keys and the replay clock. Then it
-    /// paints the backdrop, the panels, the dialogs and the loading card. It
-    /// ends with the request for the next repaint and for screenshots.
+    /// paints the backdrop, the panels and the windows over them (the dialogs,
+    /// Help, the loading card and the schematic). It ends with the request for
+    /// the next repaint and for screenshots.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
@@ -1272,6 +1273,8 @@ impl eframe::App for App {
         // The poster paper behind everything: tan with a sunburst of paler
         // rays. The central panel has no fill, so the paper shows through it.
         crate::theme::backdrop(ui.painter(), ui.ctx().content_rect());
+        // egui lays the panels out in call order: each takes its edge of the
+        // space that is left, and the central panel takes the rest.
         self.top_panel(ui);
         self.dev_pause_bar(ui);
         self.status_panel(ui, theme);
