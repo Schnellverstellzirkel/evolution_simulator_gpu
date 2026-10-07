@@ -1,16 +1,27 @@
+//! `Experiment::breed_block` fills a block of the ring from the archives,
+//! after `absorb` takes the block's results and when a save loads.
+//! `plan_offspring` picks each child's emitter, parent, mate and CMA emitter.
+//! Reseeded elites and the children of the refuge, the founder bank, the hall
+//! of fame and the hub's pen take their slots first, and `Population::breed`
+//! breeds the other slots. The breeding timers that the stage log reads live
+//! here too.
 use super::*;
 
-/// Nanoseconds of breeding spent planning, emitting offspring, and writing
-/// them into their block, since the last `take_breed_nanos`.
+/// Nanoseconds of breeding since the last `take_breed_nanos`. Slot 0 is
+/// planning. Slot 1 is the rest of `breed_block`: emitting the children and
+/// writing them into their block. Slot 2 is for writing alone and stays 0,
+/// because children are written as they are bred.
 pub static BREED_NANOS: [std::sync::atomic::AtomicU64; 3] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 3];
-/// Returns and clears the breeding timers.
+/// Returns the breeding timers (planning, emitting, writing) in nanoseconds
+/// and clears them.
 pub fn take_breed_nanos() -> [u64; 3] {
     std::array::from_fn(|i| BREED_NANOS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
 }
-/// Children written after their part of the block's arena (low 32 bits)
-/// and blocks bred into a new arena because the old one was still shared
-/// (high 32 bits), since the last `take_breed_late`.
+/// Children written after all parts of the block's arena, because they did
+/// not fit their own part (low 32 bits), and blocks bred into a new arena
+/// because the old one was still shared (high 32 bits), since the last
+/// `take_breed_late`.
 pub static BREED_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Returns and clears `BREED_LATE` as (late children, new arenas).
 pub fn take_breed_late() -> (u64, u64) {
@@ -18,15 +29,18 @@ pub fn take_breed_late() -> (u64, u64) {
     (v & 0xffff_ffff, v >> 32)
 }
 
-/// Share of the structural and novelty children of a reshaped nursery that
-/// take a limb from a body of another plan (a hybrid; Arnold, 1997).
+/// `CROSS_PLAN_MATE_SHARE` for the structural and novelty children of a
+/// reshaped nursery: the chance of drawing a mate to take a limb from (a
+/// hybrid; Arnold, 1997). The mate counts only if its body plan differs from
+/// the parent's.
 const RESHAPED_CROSS_SHARE: f32 = 0.3;
 
-/// The emitter mix of `island`: each isolated island leans a few points
-/// toward one emitter, so the islands develop different habits (Whitley,
-/// 1999). The hub, the wild islands and the nurseries keep the mix.
+/// The emitter weights of `island`. Each isolated island moves up to five
+/// points of weight from one emitter to another, so the islands develop
+/// different habits (Whitley, 1999). The hub, the wild islands and the
+/// nurseries keep `weights` as they are.
 fn island_weights(weights: &[f64; qd::EMITTER_COUNT], island: usize) -> [f64; qd::EMITTER_COUNT] {
-    // (from, to): five points move from one emitter to another.
+    // (from, to): up to five points move from one emitter to the other.
     let lean = match island {
         0 => Some((Emitter::Structural, Emitter::Cma)),
         1 => Some((Emitter::Novelty, Emitter::Structural)),
@@ -43,20 +57,26 @@ fn island_weights(weights: &[f64; qd::EMITTER_COUNT], island: usize) -> [f64; qd
     out
 }
 
-/// Share of CMA offspring whose parent is one of its island's fastest 1% of
-/// elites; the rest sample by local competition. Spending more on the best
-/// elites raised the best distance by about half in fixed-seed tests.
+/// Share of CMA offspring whose parent is one of their island's top elites
+/// (`top_parents`) or the target of an island optimizer (`OPTIMIZER_SHARE`).
+/// The rest sample by local competition. In the fixed-seed tests that added
+/// this share, the best distance rose by about half.
 const TOP_PARENT_SHARE: f32 = 0.5;
-/// Share of structural and novelty children that graft a limb from an elite
-/// with a different body plan.
+/// Chance that a structural or novelty child without a mate of its own body
+/// plan draws a mate to graft a limb from. The mate counts only if its body
+/// plan differs from the parent's. A reshaped nursery uses
+/// `RESHAPED_CROSS_SHARE` instead.
 const CROSS_PLAN_MATE_SHARE: f32 = 0.15;
 /// Share of those top-elite CMA offspring bred by an island optimizer
-/// (separable CMA-ES in physical units) on one of its fastest designs.
+/// (separable CMA-ES in physical units), on one of the island's fastest
+/// designs or on the fastest elite of its rarest clade.
 const OPTIMIZER_SHARE: f32 = 0.5;
 /// How many of an island's fastest elites the breeding plan ranks.
 const FASTEST_ELITES: usize = 512;
 
-/// Planned offspring for one breeding slot before CMA slots are assigned.
+/// The plan for one offspring, as `plan_offspring` returns it: the
+/// `CandidatePlan` that `Population::breed` follows, and what the child's
+/// `Birth` records about its parent and its protection.
 struct OffspringPlan {
     plan: CandidatePlan,
     parent_id: Option<u64>,
@@ -73,9 +93,11 @@ impl Experiment {
         }
         self.reseed.pop(qd::island_of_slot(slot, islands))
     }
-    /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
-    /// The breeding `round` salts the random streams, so no two blocks
-    /// repeat a draw.
+    /// Plans one child for each of `slots`: its emitter, parent, mate and CMA
+    /// emitter. The breeding `round` salts the random streams, so no two
+    /// blocks repeat a draw. Planning also changes the experiment. It starts
+    /// and replaces CMA emitters, counts a visit for each parent, tracks each
+    /// island's record in `island_progress` and refreshes `clade_rarity`.
     fn plan_offspring(
         &mut self,
         cfg: &Config,
@@ -83,6 +105,8 @@ impl Experiment {
         round: u64,
         slots: &[usize],
     ) -> Vec<OffspringPlan> {
+        // `plan_times` holds the seconds of each step of planning. The
+        // developer diagnostic `EVOLUTION_PROFILE_BREED` prints them at the end.
         let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
         let mut plan_times = [0.0f64; 4];
         let mut section = std::time::Instant::now();
@@ -91,12 +115,15 @@ impl Experiment {
             island.ensure_least_visited();
         }
         let weights = qd::emitter_weights(&self.emitter_stats);
+        // The `CmaEmitter`s that this call started anew because the
+        // statistics of `Emitter::Cma` are stale, by (island, niche, body
+        // plan key). The call's other stale CMA children of the same key use
+        // them.
         let mut reset_cma = HashMap::<(usize, qd::Niche, u64), usize>::new();
-        // CMA slot lookup keyed by (island, niche, body plan): an emitter
+        // CMA slot lookup keyed by (island, niche, body plan key): an emitter
         // samples around one island's elite, so it serves only that island.
-        // The bucket stores the full key, so the per-offspring probe hashes
-        // and compares without cloning the topology vector; clones are only
-        // paid when a slot is created or replaced.
+        // The bucket stores the full key, so a probe hashes and compares the
+        // island, niche and plan it is given and builds no key.
         type CmaKey = (usize, qd::Niche, u64);
         /// Lookup of CMA emitter indices keyed by (island, niche, body plan).
         struct CmaLookup {
@@ -118,6 +145,7 @@ impl Experiment {
                     .find(|((i, n, t), _)| *i == island && n == niche && *t == plan)
                     .map(|(_, index)| *index)
             }
+            /// Sets the emitter index of `key`, replacing an earlier one.
             fn insert(&mut self, key: CmaKey, index: usize) {
                 let bucket = self
                     .buckets
@@ -129,6 +157,7 @@ impl Experiment {
                     bucket.push((key, index));
                 }
             }
+            /// Removes the entry of this key if it still holds `index`.
             fn remove(&mut self, island: usize, niche: &qd::Niche, plan: u64, index: usize) {
                 let hash = Self::hash(island, niche, plan);
                 let Some(bucket) = self.buckets.get_mut(&hash) else {
@@ -153,28 +182,38 @@ impl Experiment {
         }
         let mut used_cma = vec![false; self.cma_emitters.len()];
         let mut out = Vec::with_capacity(slots.len());
-        // Phase A: emitter choice and parent sampling against the start-of-batch
-        // archive. Each creature has its own deterministic RNG, so parallel order
-        // does not change the draws. last_parent is snapshotted instead of updating
-        // mid-loop; visit() and CMA slot allocation stay sequential below.
-        /// Prepared breeding plan for one offspring: emitter, parents, and flags.
+        // Phase A: emitter choice and parent sampling against the archives as
+        // they stand when planning starts. Each creature has its own
+        // deterministic RNG, so parallel order does not change the draws.
+        // `visit()` and CMA slot allocation stay sequential in phase B, below.
+        /// What phase A decides for one offspring, before phase B gives it a
+        /// CMA emitter.
         struct PlanPrep {
             emitter: Emitter,
+            /// Elite index of the parent in `islands[island]`.
             parent: Option<usize>,
             parent_id: Option<u64>,
             /// Generation up to which the offspring is protected.
             protection: u32,
+            /// Its emitter has found nothing new in several batches in a row
+            /// (`EmitterStats::stale`).
             emitter_stale: bool,
-            /// Elite index for crossover mate, if any.
+            /// Elite index of the mate, if any: an elite of the parent's body
+            /// plan to cross with, or of another plan to graft a limb from.
             mate: Option<usize>,
+            /// Index in `islands` of the archive that the parent and the mate
+            /// come from.
             island: usize,
-            /// A fast elite whose design's optimizer breeds this offspring.
+            /// The parent is the target of an island optimizer, which breeds
+            /// this offspring.
             optimize: bool,
-            /// A reshaped child of an island elite for a reshaped nursery.
+            /// A structural child of an elite of the slot's island, for a
+            /// reshaped nursery that is still empty (`CandidatePlan::seed`).
             seeded: bool,
         }
         // Each island's elites by body plan key, grouped for crossover
-        // partners: (key, slot) sorted, so a plan's elites are one run.
+        // partners: (key, elite index) pairs, sorted, so a plan's elites are
+        // one run.
         let by_plan: Vec<Vec<(u64, u32)>> = self
             .islands
             .par_iter()
@@ -196,8 +235,9 @@ impl Experiment {
         plan_times[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        // Behavior elites per island, fastest first. Both the exploitation
-        // pool and the optimizer targets read this order.
+        // Behavior elites (those outside the morphology reserve) per island,
+        // fastest first. Both the exploitation pool (`top_parents`) and the
+        // optimizer targets read this order.
         let orders: Vec<Vec<usize>> = self
             .islands
             .par_iter()
@@ -205,8 +245,8 @@ impl Experiment {
                 let mut order: Vec<usize> = (0..island.entries.len())
                     .filter(|&i| !qd::is_morphology_niche(&island.entries[i].niche))
                     .collect();
-                // The exploitation pool and the optimizer targets only read
-                // the fastest few hundred.
+                // Only the fastest `FASTEST_ELITES` are read, so a selection
+                // cuts the rest off before the sort.
                 let faster = |&a: &usize, &b: &usize| {
                     island.entries[b]
                         .fitness
@@ -221,8 +261,10 @@ impl Experiment {
                 order
             })
             .collect();
-        // Each island's fastest elites, for exploitation: 1% of the movement
-        // grid (at least 4), however many body classes the archive holds.
+        // Each island's fastest elites, for exploitation: 1% of the elites in
+        // `orders` (counting at most `qd::MOVEMENT_CELLS`), and never fewer
+        // than 4. `orders` holds at most `FASTEST_ELITES`, so the pool has 5
+        // elites at most.
         let top_parents: Vec<Vec<usize>> = orders
             .iter()
             .map(|order| {
@@ -230,8 +272,10 @@ impl Experiment {
                 order[..count.min(order.len())].to_vec()
             })
             .collect();
-        // How rare each elite's clade is in its island, from 0 (the whole
-        // archive) to 1 (one elite).
+        // How rare each elite's clade is in its island (`clade_rarity_of`):
+        // from 0 (the whole archive) to 1 (one elite), scaled down while
+        // distance still separates the elites. It is computed once per
+        // generation, and an island that is not refined has none.
         if qd::RARITY_WEIGHT > 0.0
             && (self.clade_rarity.0 != generation
                 || self.clade_rarity.1.len() != self.islands.len())
@@ -246,9 +290,10 @@ impl Experiment {
         let rarities = &self.clade_rarity.1;
         let no_rarity = Vec::new();
         // An island's optimizer works on its fastest design: a body plan with
-        // a gait cadence band. When the island has not set a record for a
-        // while, it turns to its next fastest designs in turn, so one stuck
-        // design does not take all local search.
+        // a gait cadence band. For every `OPTIMIZER_STALL` generations without
+        // an island record it moves on to the next of the island's four
+        // fastest designs and wraps around, so one stuck design does not take
+        // all local search.
         self.island_progress
             .resize(self.islands.len(), (f32::NEG_INFINITY, generation));
         let optimizer_targets: Vec<Option<usize>> = self
@@ -281,6 +326,7 @@ impl Experiment {
         // A second optimizer target per island: the fastest elite of its
         // rarest clade, so local search also climbs a design the island is
         // about to lose (Fontaine et al., 2020, CMA-ME on several targets).
+        // An island with no clade rarities has none.
         let rare_targets: Vec<Option<usize>> = self
             .islands
             .iter()
@@ -325,6 +371,9 @@ impl Experiment {
                 let island = if seeded { home } else { arena };
                 let archive = &self.islands[island];
                 let archive_empty = archive.entries.is_empty();
+                // A seeded child is structural. An empty archive breeds new
+                // random bodies, and so does a share of the slots of a nursery
+                // of new random bodies (`qd::NURSERY_FRESH_SHARE`).
                 let emitter = if seeded {
                     Emitter::Structural
                 } else if archive_empty
@@ -337,6 +386,7 @@ impl Experiment {
                     qd::choose_emitter(&mut rng, &island_weights(&weights, island))
                 };
                 let emitter_stale = self.emitter_stats[emitter.index()].stale();
+                // The samplers can skip one elite. Planning never asks them to.
                 let avoid = None;
                 let mut optimize = false;
                 let mut from_reserve = false;
@@ -351,7 +401,9 @@ impl Experiment {
                 } else if emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
-                    // Each island keeps its own morphology reserve.
+                    // Some structural parents come from the island's own
+                    // morphology reserve (`qd::MORPHOLOGY_PARENT_FRACTION`).
+                    // When it gives none, local competition picks the parent.
                     let drawn = archive.sample_morphology(&mut rng, avoid);
                     from_reserve = drawn.is_some();
                     drawn.or_else(|| {
@@ -365,14 +417,18 @@ impl Experiment {
                         .sample_body_novel(&mut rng)
                         .or_else(|| archive.sample_novel(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
+                    // The other novelty parents, and the parents of a stale
+                    // emitter, come from the island's least visited elites.
                     archive.sample_novel(&mut rng, avoid)
                 } else if emitter == Emitter::Cma
                     && !top_parents[island].is_empty()
                     && rng.unit() < TOP_PARENT_SHARE
                 {
-                    // Half of these come from the island's optimizer for one
-                    // of its fastest designs; the rest explore around the top
-                    // elites.
+                    // Some of these (`OPTIMIZER_SHARE`) come from an island
+                    // optimizer. It works on the fastest elite of the island's
+                    // rarest clade half the time, when the island has one, and
+                    // on one of its fastest designs otherwise. The rest
+                    // explore around the top elites.
                     optimize = rng.unit() < OPTIMIZER_SHARE;
                     let second = rare_targets.get(island).copied().flatten();
                     Some(match second {
@@ -383,10 +439,14 @@ impl Experiment {
                         _ => top_parents[island][rng.index(top_parents[island].len())],
                     })
                 } else {
+                    // The rest come from a tournament of local competition.
                     let rarity = rarities.get(island).unwrap_or(&no_rarity);
                     archive.sample_local_competitive(&mut rng, avoid, rarity)
                 };
                 let parent_id = parent.map(|index| archive.entries[index].creature.id);
+                // A structural or novelty child is protected for
+                // `qd::PROTECTION_GENERATIONS` generations. Other children keep
+                // their parent's protection.
                 let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
                     generation.saturating_add(qd::PROTECTION_GENERATIONS)
                 } else {
@@ -394,6 +454,9 @@ impl Experiment {
                         .map(|index| archive.entries[index].protected_until)
                         .unwrap_or(0)
                 };
+                // One in five structural and novelty children draw another
+                // elite of the parent's body plan to cross with. A parent from
+                // the morphology reserve has no mate.
                 let mate = match (emitter, parent) {
                     (Emitter::Structural | Emitter::Novelty, Some(p))
                         if !from_reserve && rng.unit() < 0.2 =>
@@ -405,8 +468,9 @@ impl Experiment {
                     }
                     _ => None,
                 };
-                // Sometimes the mate has another body plan: the child gets one of
-                // its limbs grafted on (see `evolution::mated`).
+                // A child without a mate sometimes draws an elite of another
+                // body plan, and gets one of that elite's limbs grafted on (see
+                // `evolution::mated`).
                 let mate = mate.or_else(|| match (emitter, parent) {
                     (Emitter::Structural | Emitter::Novelty, Some(p))
                         if !from_reserve
@@ -438,6 +502,8 @@ impl Experiment {
             .collect();
         plan_times[2] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
+        // Phase B, in slot order: each CMA child gets its emitter, which may
+        // be started or replaced here, and each parent counts a visit.
         for prep in plan_prep {
             let PlanPrep {
                 emitter,
@@ -457,7 +523,8 @@ impl Experiment {
                     // Each island runs one optimizer per design. It starts from
                     // the design's fastest elite and then follows its own mean,
                     // so recentering on every lucky new best does not throw
-                    // away its progress. A converged one restarts.
+                    // away its progress. A converged one restarts, unless a
+                    // child of this call already uses it.
                     let lookup_niche = if optimize {
                         qd::optimizer_niche(island, elite.niche.0[1])
                     } else {
@@ -475,6 +542,11 @@ impl Experiment {
                     } else {
                         cma_lookup.get(island, &lookup_niche, plan)
                     };
+                    // No emitter serves the child yet. A converged optimizer is
+                    // replaced where it stands. Otherwise a new emitter takes
+                    // the next free place or, once `qd::CMA_LIMIT` are in use,
+                    // the place of the least recently used emitter that no
+                    // child of this call uses.
                     if index.is_none() {
                         let restart = cma_lookup
                             .get(island, &lookup_niche, plan)
@@ -495,9 +567,9 @@ impl Experiment {
                             // Only a new emitter needs the body itself.
                             let template = elite.creature.unpack();
                             let mut new = if optimize {
-                                // Another optimizer of this island for the
-                                // same plan lends its learned step sizes,
-                                // unless this is a restart after converging.
+                                // The most recently used optimizer of this
+                                // island for the same plan that has not
+                                // converged lends its learned step sizes.
                                 // Other islands never lend: their step sizes
                                 // carry what their search learned.
                                 self.cma_emitters
@@ -533,6 +605,8 @@ impl Experiment {
                                 self.cma_emitters.push(new);
                                 used_cma.push(false);
                             } else {
+                                // The emitter that leaves this place leaves
+                                // `cma_lookup` and `reset_cma` too.
                                 let old = &self.cma_emitters[slot];
                                 let (old_island, old_niche, old_plan) =
                                     (old.island, old.niche.clone(), old.topology.plan_key());
@@ -586,8 +660,8 @@ impl Experiment {
         }
         out
     }
-    /// Plans offspring for `slots` in the next breeding round, as a block's
-    /// breeding does, and returns the plans with that round. For
+    /// Plans offspring for `slots` in the next breeding round, as
+    /// `breed_block` does, and returns the plans with that round. For
     /// `examples/breed_bench.rs`.
     #[doc(hidden)]
     pub fn plan_for_bench(&mut self, slots: &[usize]) -> (Vec<CandidatePlan>, u64) {
@@ -603,8 +677,11 @@ impl Experiment {
     /// archives with the current settings, into `arena`: the genes of the
     /// block bred for these slots last time, whose memory the new block
     /// reuses when nothing else holds it. Elites queued by a world change
-    /// take the slots of their own islands first. An island without elites
-    /// breeds new random bodies.
+    /// take the slots of their own islands first. The refuge, the founder
+    /// bank, the hall of fame and the hub's pen fill some of the other slots,
+    /// and the plans from `plan_offspring` fill the rest. An island without
+    /// elites breeds new random bodies. The block's trial flags and the
+    /// breeding timers are set here too.
     pub(super) fn breed_block(
         &mut self,
         first: usize,
@@ -652,7 +729,10 @@ impl Experiment {
                 protection: p.protection,
             })
             .collect();
-        // Reseeded elites first, then the children.
+        // Creatures that take a position without a plan: reseeded elites,
+        // then children of the refuge, the founder bank, the hall of fame and
+        // the pen. Each one is recorded as `Birth::RANDOM`. `Population::breed`
+        // writes them at their positions and breeds the plans in the others.
         let mut lead: Vec<(usize, Creature)> = Vec::new();
         if !self.reseed.is_empty() {
             for (k, &slot) in slots.iter().enumerate() {
@@ -662,8 +742,9 @@ impl Experiment {
                 }
             }
         }
-        // After a world change the old champions keep breeding in their
-        // island's own slots for a few generations.
+        // After a world change the old champions keep breeding in some of
+        // their island's own slots for a few generations. `Refuge::child`
+        // draws which slots.
         if self.generation < self.refuge.until {
             let islands = island_count();
             let reseeded: std::collections::HashSet<usize> = lead.iter().map(|&(k, _)| k).collect();
@@ -682,8 +763,10 @@ impl Experiment {
             }
             lead.sort_by_key(|&(k, _)| k);
         }
-        // The founder bank breeds in the main islands' own slots, and the hall
-        // of fame in the hub's.
+        // The founder bank breeds in a share of the main islands' own slots
+        // (`FOUNDER_SHARE`), and the hall of fame in a share of the hub's
+        // (`HALL_SHARE`). A child gets a local mutation, and sometimes a
+        // structural one.
         if !self.founders.is_empty() || !self.hall.is_empty() {
             let islands = island_count();
             let hub = hub_island();
@@ -721,7 +804,8 @@ impl Experiment {
             }
             lead.sort_by_key(|&(k, _)| k);
         }
-        // Wild champions in the hub's pen breed in the hub's own slots.
+        // Wild champions in the hub's pen breed in a share of the hub's own
+        // slots (`PEN_SHARE`), with the same mutations as the founders.
         if !self.pen.is_empty() {
             let islands = island_count();
             let hub = hub_island();
@@ -780,10 +864,8 @@ impl Experiment {
             self.generation,
             self.breed_round,
         );
-        // Each creature's flags for its trial: the audit lane, and the
-        // exemption of nurseries and immigrants from the early rungs.
-        // The median fitness of each arena's behavior elites: a parent
-        // above it is a strong one.
+        // The median fitness of each arena's behavior elites: a parent at or
+        // above it is a strong one. Only the early rungs use it.
         let medians: Vec<f32> = if cfg.rungs.is_some() {
             self.islands
                 .iter()
@@ -805,6 +887,10 @@ impl Experiment {
         } else {
             Vec::new()
         };
+        // Each creature's flags for its trial: the audit lane, and the
+        // exemptions from the early rungs. Immigrants and lead creatures
+        // (both are `Emitter::Restart` births), children of strong parents
+        // and nursery bodies are exempt.
         population.flags.clear();
         population.flags.extend((0..count).map(|k| {
             let slot = first + k;
@@ -817,7 +903,8 @@ impl Experiment {
             let arenas = self.islands.len().max(arena_count());
             let arena = qd::arena_of_slot(slot, arenas);
             // A child whose parent is a strong elite that the rules would
-            // stop skips those rungs.
+            // stop skips those rungs. So does a child whose parent has no
+            // known profile (`rungs::parent_exemptions`).
             if let Some(rules) = &cfg.rungs {
                 let parent = births[k].parent_id.and_then(|id| self.lineage.get(&id));
                 let strong = parent
@@ -836,6 +923,8 @@ impl Experiment {
             }
             flags
         }));
+        // For the generation dump: the block's births and parents. The lead
+        // creatures have no parent in its rows.
         if let (Some(parents), Some(dump)) = (dump_parents, &self.dump) {
             let reseeded: Vec<usize> = lead.iter().map(|&(k, _)| k).collect();
             dump.lock().unwrap_or_else(|e| e.into_inner()).bred(
@@ -851,10 +940,12 @@ impl Experiment {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         };
         // Children are written into the arena as they are bred, so the
-        // write stage is part of emitting.
+        // write stage is part of emitting and its timer stays 0.
         add(0, planned_at);
         add(1, total.saturating_sub(planned_at));
         BREED_LATE.fetch_add(late as u64, std::sync::atomic::Ordering::Relaxed);
+        // A hint means the old arena was still shared, so the block went
+        // into a new one.
         if hint.is_some() {
             BREED_LATE.fetch_add(1 << 32, std::sync::atomic::Ordering::Relaxed);
         }
