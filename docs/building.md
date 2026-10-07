@@ -36,8 +36,6 @@ through Vulkan (wgpu), on the GPU the desktop uses.
 memory and occupancy as it loads. `EVOLUTION_WARP_CARVEOUT=<percent>` sets the
 shared-memory share of each multiprocessor's memory (0, the default, leaves it
 all to the L1 cache).
-`replay_match <save> --retest <count> <out.csv>` re-tests a save's best
-elites in full trials.
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
 or the GPU is not an NVIDIA GPU, the game stops with an error that says so.
@@ -53,8 +51,9 @@ python3 -m venv ~/.local/share/evolution-cuda/venv
 
 Pick an NVRTC no newer than the driver's CUDA version (`nvidia-smi` shows it;
 driver 580 is CUDA 13.0). When the engine opens, the game compiles the kernels
-of the default world (16) and the scoring kernels of the 100 wild islands' 49
-distinct worlds (196), on up to five threads, and a loading screen follows them
+of the default world (4: scoring and replay, each at the standard and the fine
+physics) and the scoring kernels of the 49 distinct worlds of the 100 wild
+islands (49), on up to five threads, and a loading screen follows them
 (`src/loading.rs`, `src/ui/loading.rs`): a card with the kernels compiling, the
 time left and a button to look around meanwhile, and a corner note after that.
 The kernels of the world after a button press compile when the world changes,
@@ -69,7 +68,7 @@ Developer diagnostics, never needed to play:
 
 ## Diagnostic examples
 
-The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`) score and replay creatures on the GPU engine. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
+The tools in `examples/` that score and replay creatures on the GPU engine are `search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `fine_check`, `replay_probe`, `champion_trace`, `world_probe`, `p2_speed` and `worker_rate`. They fail if the primary GPU does not open. The ones that share `examples/common` submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. `replay_match <save> --retest <count> <out.csv>` re-tests a save's best elites in full trials. `archive_bench`, `breed_bench`, `archive_diversity`, `island_report`, `canon_check`, `fitness_peek`, `body_regularity`, `dump_stats` and `operator_yield` read saves or dumps and need no GPU. `cargo run --release -- eval-bench` is a kernel diagnostic in the game's own binary. It scores the creatures in the ring of a save (`--checkpoint`) again and again and prints creatures per second. Run the GPU tools with the lock shared, unless they measure speed:
 
 ```bash
 EVOLUTION_DEVICES=primary flock -s target/gpu.lock cargo run --release --example first_generation 20000
@@ -87,7 +86,7 @@ The tool writes the request file `pause` in `$XDG_RUNTIME_DIR/evolution-simulato
 
 A pause lasts at most 5 minutes from when it began, even if the request stays. After a pause the game runs at least 2 minutes before it honors a new request (it writes `waiting` with the time it will), and it never honors the same request twice. The tool warns when a command ran past the 5 minutes, because the game then resumed partway through. Split such a measurement.
 
-While paused the game window shows "Paused for a developer measurement, resumes in m:ss" and a Resume now button. The replay keeps playing. A new replay cannot be recorded until the pause ends. Save, open and new game wait until the pause ends. The pause does not change the search: work is held back, never dropped, so a paused run of a fixed seed matches an undisturbed one (`tests/dev_pause.rs`). The code is in `src/dev_pause.rs` and `src/scheduler/suspend.rs`.
+While paused the game window shows "Paused for a developer measurement, resumes in m:ss" and a Resume now button. The replay keeps playing. A new replay cannot be recorded until the pause ends. The pause does not change the search: work is held back, never dropped, so a paused run of a fixed seed matches an undisturbed one (`tests/dev_pause.rs`). The code is in `src/dev_pause.rs` and `src/scheduler/suspend.rs`.
 
 ## GPU failures
 
@@ -95,7 +94,7 @@ A GPU engine that fails is dropped, and the scheduler opens it again after 1, 4 
 
 ## Machine settings for measurements
 
-These need root, so the owner runs them. `nvidia-smi -lgc <min>,<max>` pins the RTX 4060's SM clock for a measurement and `nvidia-smi -rgc` releases it. The power rows of the plan decide if a pinned clock also helps long runs.
+These need root, so the owner runs them. `nvidia-smi -lgc <min>,<max>` pins the RTX 4060's SM clock for a measurement and `nvidia-smi -rgc` releases it. The power rows below decide if a pinned clock also helps long runs.
 
 The RTX's PCIe link idles at Gen 1 x8 and trains up to Gen 4 under load. On 2026-09-30 `nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.gen.max --format=csv` printed 1 and 4 on the idle machine, and the device's runtime PM (`/sys/bus/pci/devices/0000:01:00.0/power/control`) was `auto`. A speed change is a link retrain of 1 to 5 ms, and no DMA moves during it. Waves that last seconds never notice. Blocks of 50 ms may pay it on their first upload, and a replay click or the first block after a world change waits for it. To check, run `nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv -lms 10` beside `worker_rate` and count the gen changes per second. If there is more than one per second, keep the link up with two one-time root settings and measure again:
 
@@ -146,7 +145,7 @@ The tools:
 
 - `examples/power_probe.rs <fma|mio|int|idle> [seconds] [cubin-dir]` runs one synthetic NVRTC kernel at full occupancy (48 warps per SM). `fma` is 8 chaotic FFMA chains per thread in registers. `mio` has one shared-memory load and one shuffle per two FFMAs, so 49% of its instructions go to the MIO pipes. `int` is IMAD, LOP3 and IADD3 chains with one shuffle in six instructions. It prints warp instructions per second from the loop's SASS count (131, 131 and 99 instructions per iteration with NVRTC 13.0 on sm_89, counted with `cuobjdump -sass` on the cubins it writes to `cubin-dir`) and the SM clock the kernel itself saw. The Ada peak is 4 warp instructions per SM per clock. nJ per warp instruction is the busy GPU power divided by that rate.
 - `tools/cpu-burn.c <threads> [duty%] [period_ms] [seconds]` keeps N threads on AVX-512 FMAs for duty% of each period, all threads on the same period grid. It stops on SIGTERM and prints the busy core-seconds.
-- `examples/p2_speed.rs` scores the 262,144 creatures of the generation-10 dump, one warm-up pass and 5 timed passes, about 28 s. The dump is at `~/.cache/evolution-simulator/power-dump.bin` (copied from the warp track's scratchpad `save_dump.bin`).
+- `examples/p2_speed.rs` scores the 262,144 creatures of the generation-10 dump, one warm-up pass and 5 timed passes. The dump is at `~/.cache/evolution-simulator/power-dump.bin` (copied from the warp track's scratchpad `save_dump.bin`).
 
 A row needs the RTX to itself and a quiet CPU, because Dynamic Boost takes the 15 W from the RTX as soon as the APU draws more. Other GPU work shares the SMs by time slices: the fma probe beside other agents' runs read 1.0 to 2.6 warp instructions per SM per clock at full clock, against a peak of 4. So a calibration row runs under `flock -x target/gpu.lock` with nothing else on the RTX, and the APU column shows how quiet the CPU was.
 
@@ -177,9 +176,9 @@ Each result is the busy summary of the sampler. For p2_speed rows the rate is th
 | 19 | p2_speed for 10 minutes | 10 min of GPU | | | | | | | |
 | 19a | p2_speed, 4 and 8 CPU threads at 20% duty in 20 ms bursts | quiet machine | | | | | | not taken | |
 
-The agent rows of 2026-09-30 (21:06 to 21:15) are not the calibration. The exclusive lock waited more than an hour behind other agents' 3M-creature searches, so they were taken under the shared lock with 1 to 5 other processes on the RTX. Those processes share the SMs by time slice, so every rate is a lower bound and the power includes their kernels. Rows 0 to 2 fall from 12.3 to 7.0M creature-steps/s because more processes joined, not because of the CPU threads, so they say nothing about the host tax (43 to 45M is the exclusive rate on this dump). The APU sat near 29 W in all of them and the limit stayed near 100 W. Two things they do show. The FMA kernel reached 2.64 warp instructions per SM per clock of the 4.0 peak even while sharing, and at that rate it met the power limit (39% of samples at the SW power cap, 15% thermal, clock down to 1,965 MHz). So a register-dense kernel does run into the cap on this laptop, and row 11 on a quiet GPU will give the cap clock. The MIO kernel issued only 0.36 warp instructions per SM per clock at full clock and 61 W, which is 0.18 shared loads and shuffles per SM per clock. If that holds on a quiet GPU, an MIO-heavy kernel is bound by the MIO pipe long before it is bound by power.
+The agent rows of 2026-09-30 (21:06 to 21:15) are not the calibration. The exclusive lock waited more than an hour behind other agents' 3M-creature searches, so they were taken under the shared lock with 1 to 5 other processes on the RTX. Those processes share the SMs by time slice, so every rate is a lower bound and the power includes their kernels. Rows 0 to 2 fall from 12.3 to 7.0M creature-steps/s because more processes joined, not because of the CPU threads, so they say nothing about the host tax (43 to 45M is the exclusive rate on this dump). Every p2_speed rate and pass time on this page comes from the lane-group kernel, which `shaders/creature.cu` replaced on 2026-10-06. The current kernel runs 16 substeps per step, so it simulates fewer creature-steps per second and these passes take longer now. The APU sat near 29 W in all of them and the limit stayed near 100 W. Two things they do show. The FMA kernel reached 2.64 warp instructions per SM per clock of the 4.0 peak even while sharing, and at that rate it met the power limit (39% of samples at the SW power cap, 15% thermal, clock down to 1,965 MHz). So a register-dense kernel does run into the cap on this laptop, and row 11 on a quiet GPU will give the cap clock. The MIO kernel issued only 0.36 warp instructions per SM per clock at full clock and 61 W, which is 0.18 shared loads and shuffles per SM per clock. If that holds on a quiet GPU, an MIO-heavy kernel is bound by the MIO pipe long before it is bound by power.
 
-Rows 14 to 16 are not taken. The engine sizes each wave's grid to the resident capacity and runs up to 8 waves at once on separate streams, so a grid cap in p2_speed does not set the blocks per SM. They need a per-SM cap in `src/cuda_engine.rs`, and the plan's session (section 6, item 1) leaves them out.
+Rows 14 to 16 are not taken. The engine sizes each wave's grid to the resident capacity and runs up to 8 waves at once on separate streams, so a grid cap in p2_speed does not set the blocks per SM. They need a per-SM cap in `src/cuda_engine.rs`, and the owner's session below leaves them out.
 
 ### The owner's session
 
@@ -217,7 +216,7 @@ export -f row burn
    flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r04 burn 16 100; row r19a-4 burn 4 20; row r19a-8 burn 8 20'
    ```
 
-4. Row 19, no root, with the game closed (it is longer than a pause): 135 timed passes of about 4.4 s.
+4. Row 19, no root, with the game closed (it is longer than a pause): 135 timed passes, which took about 4.4 s each with the lane-group kernel.
 
    ```bash
    flock -x target/gpu.lock bash -c 'row r19 target/power/release/examples/p2_speed $D 262144 135'
@@ -265,12 +264,13 @@ Each `target/power/rows/<row>.txt` holds the p2_speed or probe lines and the sam
 
 ## Environment variables
 
-`cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Speed and search settings (GPU slots, batch and unit sizes, workgroup sizes, screening, the anatomy operators, joint damping, Hill speed) are fixed in the code and have no switch. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
+`cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable, and `BIO_OFF`, is a developer diagnostic or a measuring control. Speed and search settings (GPU slots, batch and unit sizes, the kernel's block size, screening, the anatomy operators, joint damping, Hill speed) are fixed in the code and have no switch. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
 
 - Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine; other names add NVIDIA GPUs), `RAYON_NUM_THREADS` (lowers the general worker pool), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
 - CUDA: `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE`, `EVOLUTION_WARP_CARVEOUT` (see the CUDA section). `EVOLUTION_KERNEL_CACHE=<dir>` keeps compiled kernels there instead of `~/.cache/evolution-simulator/cuda`. `EVOLUTION_NVRTC_EXTRA` adds NVRTC options (for example `-lineinfo` for a profiler). `EVOLUTION_KERNEL_SOURCE=<file>` compiles the kernel from that copy of `shaders/creature.cu` instead of the one built in, so a kernel edit needs no Rust rebuild.
 - Failure and tests: `EVOLUTION_SIMULATE_GPU_LOSS=<n>` makes the GPU fail once after n units of results, to watch the scheduler reopen it. `EVOLUTION_TEST_POPULATION` and `EVOLUTION_TEST_CHECKPOINT` feed the ignored GPU worker tests in `src/worker.rs`.
 - Examples: `EVOLUTION_AB_SAVE=<dir>` makes `search_ab` save each seed's final game as `<dir>/seed-<seed>.evo`; `EVOLUTION_ISLAND=<n>` makes `physics_audit` audit island n instead of the global archive; `EVOLUTION_NODE_SLIP` adds the champion's contact details to `size_report`.
-- Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings. `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]` runs one generation with the screen bar off, re-runs the island elites in it, and writes a 64 B row per creature and a 32 B row per elite (`storage::dump` has the layout). `dump_stats <path>` and `operator_yield <path>` (the children each structural operator got into an archive, and the distance they added) read it. The CUDA kernel writes the rung trace (distances at 1, 2.5, 5 and 10 s, the early features, the end code with the rung that stopped the trial, the cadence bands and the audit bit) into seven result words nothing else reads. `EVOLUTION_NO_RUNGS=1` removes the audit lane and the early rungs, to measure the game without them in the same build (`search_ab` prints one `lanes` line per generation, the mean GPU lanes a ring creature takes and the share in each lane class, and one `rungs` line per generation: steps per creature, stops per rung, audit rows, the audit lane's miss estimate and how much of the final top 1% and 10% the ladder and the 5 s screen alone would keep; `--seconds N` stops a run after N seconds of wall time, and `--resume <save>` starts from a save's archives at the population you give).
+- Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings. `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]` runs one generation with the screen bar off, re-runs the island elites in it, and writes a 64 B row per creature and a 32 B row per elite (`storage::dump` has the layout). `dump_stats <path>` and `operator_yield <path>` (the children each structural operator got into an archive, and the distance they added) read it. The CUDA kernel writes the rung trace (distances at 1, 2.5, 5 and 10 s, the early features, the end code with the rung that stopped the trial, the cadence bands and the audit bit) into seven result words nothing else reads. `EVOLUTION_NO_RUNGS=1` removes the audit lane and the early rungs, to measure the game without them in the same build (`search_ab` prints one `rungs` line per generation: steps per creature, stops per rung, audit rows, the audit lane's miss estimate and how much of the final top 1% and 10% the ladder and the 5 s screen alone would keep. It also still prints a `lanes` line from the lane-group kernel, which never changes now that one thread runs a creature. `--seconds N` stops a run after the generation that ends past N seconds of wall time, and `--load <save>` starts from a save's archives at the population you give).
+- Biodiversity features: `BIO_OFF=<bits>` is a temporary developer switch that turns some of them off one at a time to measure them: 16 removes the 3 generations a graduate keeps its cell against bodies of other plans, 32 gives the reshaped nurseries the ordinary share of limb grafts from another plan (15%) in place of 30%, 64 removes the optimizer target on an island's rarest clade, and 128 removes the stepping stones.
 - Benchmarks and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
 - Unattended runs: `EVOLUTION_AUTOSTART="Autochange environment=1"` sets the listed effect levels (the list may be empty), turns autosave on every 10 generations and starts evolving continuously. `EVOLUTION_AUTOCHANGE_EVERY=<n>` makes the autochange step every n generations at any level above Off, and `EVOLUTION_CAPTURE_EVERY=<n>` saves the game window to `runs/progress-gen<g>.png` every n generations. With `EVOLUTION_SMOKE_CHECKPOINT=<save>` the unattended run opens that save instead of a new game and turns its autosave on.
