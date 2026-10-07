@@ -1,22 +1,28 @@
-//! The CPU side of the search at full scale, without a GPU: the production
-//! ring absorbs and breeds blocks on a save's archives, with scores that a
-//! cheap function of each creature's genes stands in for. It measures the
-//! archive and breeding seconds per generation for a given archive layout,
-//! and `perf record` on it shows where they go.
+//! The CPU side of the search at full scale, without a GPU. The production
+//! ring absorbs and breeds blocks on a save's archives, and a cheap function
+//! of each creature's genes stands in for its score. The tool measures the
+//! archive and breeding seconds per generation for a given archive layout.
+//! `perf record` on it shows where those seconds go.
 //!
-//! The stand-in score is the world's top distance for a body whose rhythm
-//! period is under 0.5 s (so many bodies tie there, to the last digits, as
-//! evolved bodies do) and less for a longer one. Its behavior follows the
-//! start pose: the share of nodes near the ground, the clock's frequency, the
-//! body's height and its feet. Bodies below half the top distance are
-//! screened, as the early screen stops them.
+//! The stand-in score is the top distance, `CAP`, for a body whose first
+//! muscle has a period under about 0.485 s. Many bodies tie there to about
+//! seven digits, as evolved bodies do. A longer period scores less. The
+//! behavior comes from the genes. Ground contact follows the mean height of
+//! the nodes in the start pose, and gait frequency follows the period. The
+//! height of the body and its feet also come from the start pose. A body below
+//! half the top distance is screened, as the early screen would stop it.
 //!
-//! Usage: archive_bench <save, or `new` for a new game> <population> <generations> [change-at]
+//! Usage: `archive_bench <save> <population> <generations> [change-at]`
 //!
-//! With `change-at` the world changes before that generation of the run, to
-//! the next autochange step. The stand-in scores ignore the world, so the
-//! elites tested again score as before, and the run shows what an archive
-//! costs while it refills.
+//! `<save>` is a save the game can load, or `new` for a new game of seed 38.
+//! A generation has `<population>` creatures. With `change-at` the world
+//! changes before that generation of the run, counted from 0, to the next
+//! autochange step. The run stops with an error if that step changes nothing.
+//! The stand-in scores ignore the world, so the elites tested again score as
+//! before, and the run shows what an archive costs while it refills.
+//!
+//! The Rayon pool has `engine::rayon_threads()` threads. `RAYON_NUM_THREADS`
+//! can lower that number.
 #[path = "diversity_common/mod.rs"]
 mod diversity;
 use anyhow::Result;
@@ -28,9 +34,11 @@ use evolution_simulator::{
     storage,
 };
 
-/// The top distance of the stand-in world.
+/// The distance in metres that the best stand-in bodies tie at.
 const CAP: f32 = 34.07;
 
+/// A number between -1 and 1 that a hash of `id` picks. The same id gives the
+/// same number.
 fn noise(id: u64) -> f32 {
     let mut h = id.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     h ^= h >> 29;
@@ -39,6 +47,10 @@ fn noise(id: u64) -> f32 {
     (h & 0xff_ffff) as f32 / 0x80_0000 as f32 - 1.0
 }
 
+/// The stand-in score of every creature in `population`, from its genes and
+/// its id. A body with no muscle counts as period 0.5 s. The distance at the
+/// screen is a quarter of the score. The rung trace stays empty, so the audit
+/// lane gets no rows.
 fn evaluate(population: &Population, _: &Config) -> Result<Vec<EvaluationMetrics>> {
     Ok(population
         .genomes
@@ -77,9 +89,10 @@ fn evaluate(population: &Population, _: &Config) -> Result<Vec<EvaluationMetrics
         .collect())
 }
 
-/// Processor time of this process (user and system): other work on a shared
-/// machine moves it less than the wall clock.
+/// Processor time of this process, user and system. It is steadier than the
+/// wall clock when other work runs on the machine.
 fn cpu_seconds() -> f64 {
+    // SAFETY: `rusage` is plain data, and all zeros is a valid value.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: getrusage fills the struct it is given.
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
@@ -88,6 +101,8 @@ fn cpu_seconds() -> f64 {
 }
 
 fn main() -> Result<()> {
+    // The main thread and the Rayon pool run at a low priority, so the bench
+    // yields to the desktop.
     evolution_simulator::engine::lower_thread_priority();
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(evolution_simulator::engine::rayon_threads())
@@ -122,13 +137,17 @@ fn main() -> Result<()> {
             .join(" "),
     );
     println!("world {}", diversity::world_line(&experiment.config));
+    // One line with the ways of moving of each archive and whether it is
+    // refined. Entry 0 is the global archive and entry k is island k - 1. The
+    // nurseries are left out.
     let progress = |experiment: &storage::Experiment| {
         let archives = std::iter::once(&experiment.archive).chain(&experiment.islands);
         archives
             .take(storage::island_count() + 1)
             .enumerate()
             .map(|(k, a)| {
-                // Islands 1 to 5 of this list also have a record generation.
+                // An island also shows the generation of its record, once
+                // `island_progress` holds one.
                 let record = k
                     .checked_sub(1)
                     .and_then(|k| experiment.island_progress.get(k))
@@ -143,10 +162,13 @@ fn main() -> Result<()> {
             .join("; ")
     };
     println!("{}", progress(&experiment));
+    // Archive and breeding seconds, summed over the run.
     let mut total = [0.0f64; 2];
     let mut cpu_total = 0.0;
     for step in 0..generations {
         if change_at == Some(step) {
+            // The world changes as a button press does: the next step of the
+            // autochange ladder applies now.
             let before = experiment.config.clone();
             let mut cfg = before.clone();
             let next = cfg.autochange_step;
@@ -170,6 +192,8 @@ fn main() -> Result<()> {
         let [archive, breeding] = std::mem::take(&mut experiment.stage_seconds);
         total[0] += archive;
         total[1] += breeding;
+        // Elites of the global archive that entered or improved in this
+        // generation.
         let changed = experiment
             .archive
             .entries
