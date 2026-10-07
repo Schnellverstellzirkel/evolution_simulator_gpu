@@ -271,7 +271,7 @@ fn commit(c: &mut Creature, mut next: Creature, cfg: &Config, rng: &mut Rng) -> 
 /// It has a joint range of 0.4 to 0.9 rad each way and carries a weight of
 /// `mass` at 0.85 of its length. A hinge muscle with the rhythm of `template`
 /// swings it at phase `phase`. Returns false when there is no room for one node
-/// and two muscles, or when `site` has no bone above it, which is the head.
+/// and two muscles, or when `site` is the head, which has no bone above it.
 #[allow(clippy::too_many_arguments)]
 fn add_swinger(
     c: &mut Creature,
