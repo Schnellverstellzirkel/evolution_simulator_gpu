@@ -382,8 +382,9 @@ pub(crate) fn straighten_leg_column(
 
 /// Turns the last bone of a leg that points down to point forward, flat
 /// along the ground, so it is a sole. A flat foot (a bear or a human) has a
-/// long contact and a wide base, and the ankle can roll over it. Only feet
-/// that point 0.3 rad or more below horizontal turn.
+/// long contact and a wide base, and the ankle can roll over it. A foot turns
+/// only if its drop is more than 0.3 of its length and the turn is 0.3 rad or
+/// more. It ends level to within a slope of 0.1.
 pub(crate) fn flatten_foot_sole(
     c: &mut Creature,
     _cfg: &Config,
@@ -413,11 +414,13 @@ pub(crate) fn flatten_foot_sole(
     true
 }
 
-/// Lengthens a short foot segment to 1.0 to 1.3 times the bone above it and
-/// stands it nearly vertical, so the heel is held high and the animal walks on
-/// its toes. A digitigrade foot (a dog, a cat, a horse) makes the leg longer
-/// at no cost in the thigh and gives a long lever for the ankle (Alexander).
-/// The toe node loses a fifth of its width to keep the swing light.
+/// Lengthens a short foot segment (under 0.9 times the bone above it) to 1.0 to
+/// 1.3 times the bone above it and stands it nearly vertical, so the heel is
+/// held high and the animal walks on its toes. A digitigrade foot (a dog, a
+/// cat, a horse) makes the leg longer at no cost in the thigh and gives a long
+/// lever for the ankle (Alexander). The new length stops at the longest bone
+/// allowed. The toe node loses a fifth of its diameter, down to the smallest
+/// size, to keep the swing light.
 pub(crate) fn raise_heel_digitigrade(
     c: &mut Creature,
     cfg: &Config,
@@ -455,10 +458,12 @@ pub(crate) fn raise_heel_digitigrade(
     true
 }
 
-/// Gives the muscles across the last two joints of a leg an elastic tendon of
-/// 0.4 to 0.9. The tendon stores the stretch of the muscle as the foot lands
-/// and gives it back in the push off, as the Achilles tendon of a running
-/// mammal does (Alexander). It makes a bouncing, hopping gait cheap to reach.
+/// Gives an elastic tendon of 0.4 to 0.9 to the active muscles that end on the
+/// last bone of a leg of two or more bones and have a tendon under 0.2. Each
+/// muscle gets its own value. The tendon stores the stretch of the muscle as
+/// the foot lands and gives it back in the push off, as the Achilles tendon of
+/// a running mammal does (Alexander). It makes a bouncing, hopping gait cheap
+/// to reach.
 pub(crate) fn tendon_the_ankle(
     c: &mut Creature,
     _cfg: &Config,
@@ -489,10 +494,12 @@ pub(crate) fn tendon_the_ankle(
 }
 
 /// Grows a foot onto the tip of a leg of two or more bones: one short bone,
-/// 30 to 60% of the last one, pointing forward and a little down, with a
-/// muscle across the ankle a quarter cycle behind the leg's muscles. The foot
+/// 30 to 60% of the last one and 0.04 to 0.4 long, pointing forward and down by
+/// up to 0.6 rad. A new muscle across the ankle takes the timing of the leg's
+/// strongest muscle (`leg_template`) with its phase raised by 0.25. The foot
 /// gives the leg a toe to push off and a lever for the stance. Its tip is the
-/// leg's new end, and the idlest tip elsewhere goes back.
+/// leg's new end, and the idlest tip elsewhere goes back. The operator refuses
+/// when no other tip can go.
 pub(crate) fn grow_forward_foot(
     c: &mut Creature,
     cfg: &Config,
@@ -536,10 +543,14 @@ pub(crate) fn grow_forward_foot(
 }
 
 /// Re-cuts a leg of two or more bones in new proportions with the same total
-/// length: either long at the bottom (each bone 0.75 to 1.35 times as long as
-/// the one above, as in the running mammals, whose distal bones are long and
-/// light) or long at the top (the digging and kicking form). The nodes follow
-/// the directions of the bones, and the strokes of muscles keep their ratio.
+/// length. Each bone is scaled by a weight from 0.75 to 1.35. The weights rise
+/// down the leg for a leg that is long at the bottom, as in the running
+/// mammals, whose distal bones are long and light, and fall down the leg for
+/// one that is long at the top, the digging and kicking form. The total length
+/// stays the same unless a bone hits a limit: 0.03 at the least and the
+/// longest bone allowed at the most. A leg where every bone would change by
+/// less than 8% is left alone. The nodes follow the directions of the bones,
+/// and the strokes of muscles keep their ratio.
 pub(crate) fn set_leg_proportions(
     c: &mut Creature,
     _cfg: &Config,
@@ -551,6 +562,8 @@ pub(crate) fn set_leg_proportions(
     };
     let n = leg.len();
     let distal = rng.unit() < 0.5;
+    // The weight of bone `i`, counted from the top: 0.75 rising to 1.35 at the
+    // bottom for a distal leg, and the reverse otherwise.
     let weight = |i: usize| {
         let t = i as f32 / (n - 1) as f32;
         0.75 + 0.6 * if distal { t } else { 1.0 - t }
@@ -560,6 +573,8 @@ pub(crate) fn set_leg_proportions(
         .map(|i| weight(i) * c.bones[leg[i]].rest_length)
         .sum();
     let limit = max_bone_length();
+    // How much each bone grows: its weight, scaled so the total length stays
+    // the same, kept inside the length limits.
     let factors: Vec<f32> = (0..n)
         .map(|i| {
             let length = c.bones[leg[i]].rest_length;
@@ -589,11 +604,14 @@ pub(crate) fn set_leg_proportions(
     true
 }
 
-/// Gives every foot (the end node of each leg of two or more bones) one form:
-/// a hoof, which is 0.55 to 0.8 times as wide and grips hard, or a pad, which
-/// is 1.25 to 1.6 times as wide and grips more. A small hard tip lands on one
-/// point with little swung mass (a horse), and a wide soft pad spreads the load
-/// and does not slip (a bear). Grip is a body property, not a fitness term.
+/// Gives every foot (the end node of each leg of two or more bones) one form.
+/// A hoof is 0.55 to 0.8 times as wide, and its friction rises by 50 to 80% of
+/// the way to the maximum. A pad is 1.25 to 1.6 times as wide, and its friction
+/// rises by 30 to 60% of the way. Both stay inside the size and friction limits
+/// of `cfg`. A small hard tip lands on one point with little swung mass (a
+/// horse), and a wide soft pad spreads the load and does not slip (a bear).
+/// Grip is a body property, not a fitness term. The operator reports a change
+/// only if the diameter or friction of some foot moves by more than 0.0001.
 pub(crate) fn harden_or_pad_foot(
     c: &mut Creature,
     cfg: &Config,
@@ -626,11 +644,15 @@ pub(crate) fn harden_or_pad_foot(
     changed
 }
 
-/// Sets the muscles across each leg's knee (those between the leg's own bones)
-/// a quarter cycle behind the strongest muscle across the hip, in every leg
-/// that has both, or three quarters behind in every leg. The knee flexes as
-/// the hip swings, a phase relation that central pattern generators of
-/// walking animals keep fixed (Ijspeert) so the leg is a coordinated whole.
+/// Retimes the knee muscles of each leg of two or more bones that has both a
+/// hip muscle and a knee muscle. A hip muscle joins the leg's top bone to a
+/// bone outside the leg, and a knee muscle joins two bones of the leg. The knee
+/// muscles of a leg move together, so that the strongest of them has a phase
+/// 0.25 above the phase of the strongest hip muscle. In 3 calls of 10 the lag
+/// is 0.75 instead, in every leg of that call. A leg that is already within
+/// 0.001 of its target is left alone. The knee flexes as the hip swings, a
+/// phase relation that central pattern generators of walking animals keep fixed
+/// (Ijspeert), so the leg is a coordinated whole.
 pub(crate) fn lag_knee_behind_hip(
     c: &mut Creature,
     _cfg: &Config,
@@ -674,6 +696,9 @@ mod tests {
     use super::*;
     use crate::evolution::repair;
 
+    /// Runs every operator of this file on 120 test bodies. A body an operator
+    /// changes stays within the node and muscle caps and has one bone fewer
+    /// than nodes, and a body it refuses is left as it was.
     #[test]
     fn leg_operators_keep_the_body_valid() {
         let cfg = Config::default();
