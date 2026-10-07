@@ -1,7 +1,8 @@
 //! The Race tab. It replays the top five creatures of the ranked archive side
 //! by side, or the creatures the player sent with "Race it" against the
 //! champion, and it shows live standings. This file adds the race methods to
-//! `App`. `ui.rs` holds the race fields and `viewport.rs` adds the picks.
+//! `App`. `ui.rs` holds the race fields and plays the lanes, and `viewport.rs`
+//! adds the picks.
 
 use super::{
     App,
@@ -444,10 +445,10 @@ impl App {
             &right,
         );
     }
-    /// The standings board beside the lanes. It lists the lanes by live
-    /// distance, with the leader in the accent color, and a "Live distance"
-    /// caption at the bottom. A row that would run into the caption is left
-    /// out.
+    /// The standings board beside the lanes. Under its "Standings" title it
+    /// lists the lanes by live distance, with the leader in the accent color.
+    /// A "Live distance" caption sits at the bottom, and a row that would run
+    /// into the caption is left out.
     fn paint_race_standings(
         &self,
         painter: &egui::Painter,
