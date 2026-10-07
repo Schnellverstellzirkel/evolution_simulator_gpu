@@ -58,7 +58,7 @@ pub(super) struct Playback {
     /// shows the pose after `n` steps. A replay without a recording has one
     /// frame.
     pub(super) frames: Vec<Vec<[f32; 2]>>,
-    /// Index of the frame on screen.
+    /// Index of the current frame.
     pub(super) tick: u32,
     /// Replay time (s) that the player has added and not yet played as a
     /// step. The player adds the time of each UI frame and takes one step's
@@ -165,6 +165,8 @@ impl Playback {
             })];
         let height = body_height(scored, &nodes);
         let peak = body_peak(scored, &nodes);
+        // Which nodes touch the ground in each frame. Only the force estimate
+        // reads this.
         let contact: Vec<Vec<bool>> = frames
             .iter()
             .map(|frame| {
@@ -173,7 +175,7 @@ impl Playback {
                 down
             })
             .collect();
-        // The values the engine recorded, else an estimate from the frames.
+        // The values the kernel recorded, else an estimate from the frames.
         let forces = recorded_forces.unwrap_or_else(|| {
             crate::replay_forces::analyze(
                 &normalized,
@@ -368,9 +370,11 @@ pub(super) struct FrameMarks {
     pub(super) broken: Vec<bool>,
     /// Stored energy per muscle (1 is rested), for fading tired muscles.
     pub(super) energy: Vec<f32>,
-    /// Muscle force per muscle (N) and ground push per node (N), drawn as
-    /// arrows when `arrows` is on.
+    /// Force per muscle (N), drawn as arrows along the muscle when `arrows` is
+    /// on.
     pub(super) muscle_force: Vec<f32>,
+    /// Ground push per node (N), drawn as an arrow under the node when `arrows`
+    /// is on.
     pub(super) ground_force: Vec<f32>,
     /// Whether to draw the force arrows.
     pub(super) arrows: bool,
@@ -381,8 +385,8 @@ impl FrameMarks {
     /// the energy of every muscle, for screenshots.
     pub(super) fn of(playback: &Playback) -> Self {
         let tick = playback.tick as usize;
-        // The list of one frame out of a list per frame, empty when the frame
-        // has none.
+        // One frame's values out of the values of every frame, empty when the
+        // frame is missing.
         let at = |per_frame: &[Vec<f32>]| per_frame.get(tick).cloned().unwrap_or_default();
         let mut marks = Self {
             time: playback.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
