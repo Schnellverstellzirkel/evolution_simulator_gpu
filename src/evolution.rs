@@ -309,32 +309,27 @@ impl StoredCreature {
     pub fn unpack_into(&self, creature: &mut Creature) {
         let nodes_end = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4);
         let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
+        // Straight into the creature's arrays: a `Bounded` temporary is moved
+        // whole (a creature's arrays are about 6.4 KB however few genes they
+        // hold), and breeding unpacks a parent for most children.
+        creature.nodes.clear();
         creature
             .nodes
-            .clone_from(&Bounded::from_slice(bytemuck::cast_slice(
-                &self.genes[..nodes_end],
-            )));
+            .extend_from_slice(bytemuck::cast_slice(&self.genes[..nodes_end]));
+        creature.bones.clear();
         creature
             .bones
-            .clone_from(&Bounded::from_slice(bytemuck::cast_slice(
-                &self.genes[nodes_end..bones_end],
-            )));
+            .extend_from_slice(bytemuck::cast_slice(&self.genes[nodes_end..bones_end]));
+        creature.muscles.clear();
         creature
             .muscles
-            .clone_from(&Bounded::from_slice(bytemuck::cast_slice(
-                &self.genes[bones_end..],
-            )));
+            .extend_from_slice(bytemuck::cast_slice(&self.genes[bones_end..]));
         creature.id = self.id;
     }
     pub fn unpack(&self) -> Creature {
-        let nodes_end = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4);
-        let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
-        Creature {
-            nodes: Bounded::from_slice(bytemuck::cast_slice(&self.genes[..nodes_end])),
-            bones: Bounded::from_slice(bytemuck::cast_slice(&self.genes[nodes_end..bones_end])),
-            muscles: Bounded::from_slice(bytemuck::cast_slice(&self.genes[bones_end..])),
-            id: self.id,
-        }
+        let mut creature = Creature::default();
+        self.unpack_into(&mut creature);
+        creature
     }
 }
 impl From<Creature> for StoredCreature {
@@ -1402,9 +1397,20 @@ pub struct GrowthStep {
 /// check reads `cfg.max_nodes` and `cfg.max_muscles`, so tighter limits
 /// reach them as a config (`None` when the config's own caps apply).
 pub fn child_limits(cfg: &Config, parent: &Creature, step: Option<GrowthStep>) -> Option<Config> {
+    child_limits_for(cfg, parent.nodes.len(), parent.muscles.len(), step)
+}
+
+/// `child_limits` for a parent of `nodes` nodes and `muscles` muscles, so a
+/// stored parent need not be unpacked to be counted.
+fn child_limits_for(
+    cfg: &Config,
+    nodes: usize,
+    muscles: usize,
+    step: Option<GrowthStep>,
+) -> Option<Config> {
     let step = step?;
-    let nodes = cfg.max_nodes.min(parent.nodes.len() + step.nodes);
-    let muscles = cfg.max_muscles.min(parent.muscles.len() + step.muscles);
+    let nodes = cfg.max_nodes.min(nodes + step.nodes);
+    let muscles = cfg.max_muscles.min(muscles + step.muscles);
     (nodes < cfg.max_nodes || muscles < cfg.max_muscles).then(|| Config {
         max_nodes: nodes,
         max_muscles: muscles,
@@ -1438,9 +1444,10 @@ fn offspring(
 ) -> ChildTrace {
     let mut trace = ChildTrace::default();
     let limited = match plan.emitter {
-        Emitter::Structural | Emitter::Novelty => plan
-            .parent
-            .and_then(|p| child_limits(cfg, &archive.entries[p].creature.unpack(), step)),
+        Emitter::Structural | Emitter::Novelty => plan.parent.and_then(|p| {
+            let parent = &archive.entries[p].creature;
+            child_limits_for(cfg, parent.node_count(), parent.muscle_count(), step)
+        }),
         Emitter::Restart | Emitter::Cma => None,
     };
     let cfg = limited.as_ref().unwrap_or(cfg);
@@ -1567,20 +1574,17 @@ fn mated(
     rng: &mut Rng,
     child: &mut Creature,
 ) {
-    let parent = archive.entries[plan.parent.expect("archive parent")]
-        .creature
-        .unpack();
-    let parent = &parent;
+    let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
     match plan.mate {
         Some(mate) => {
             let mate = archive.entries[mate].creature.unpack();
             let mate = &mate;
-            if same_shape(parent, mate) {
-                crossover_into(parent, mate, rng, child);
+            parent.unpack_into(child);
+            if same_shape(child, mate) {
+                cross_onto(child, mate, rng);
             } else {
                 // Different body plans: graft one of the mate's limbs, with
                 // its muscles and rhythm, onto a copy of the parent.
-                child.clone_from(parent);
                 for _ in 0..4 {
                     if anatomy::graft_from(child, cfg, rng, mate) {
                         break;
@@ -1588,7 +1592,7 @@ fn mated(
                 }
             }
         }
-        None => child.clone_from(parent),
+        None => parent.unpack_into(child),
     }
 }
 
@@ -1619,9 +1623,13 @@ pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
 /// `crossover` into `child`, which it overwrites.
 fn crossover_into(a: &Creature, b: &Creature, rng: &mut Rng, child: &mut Creature) {
     child.clone_from(a);
-    if a.nodes.len() != b.nodes.len()
-        || a.bones.len() != b.bones.len()
-        || a.muscles.len() != b.muscles.len()
+    cross_onto(child, b, rng);
+}
+/// `crossover_into` for a child that already holds its first parent.
+fn cross_onto(child: &mut Creature, b: &Creature, rng: &mut Rng) {
+    if child.nodes.len() != b.nodes.len()
+        || child.bones.len() != b.bones.len()
+        || child.muscles.len() != b.muscles.len()
     {
         return;
     }
