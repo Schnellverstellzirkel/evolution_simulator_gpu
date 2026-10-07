@@ -192,11 +192,11 @@ fn neighbour(c: &Creature, legs: &Limbs, k: usize) -> Option<usize> {
     })
 }
 
-/// A leg whose foot a muscle can sense gets a landing reflex: every muscle
-/// that sees the foot restarts at the beginning of its stroke when the foot
-/// lands, so a landing starts the stance push at once (Cruse: touchdown
-/// triggers stance). The leg keeps its timing relative to its strongest
-/// muscle.
+/// Gives one random leg whose foot a muscle can sense a landing reflex. Each
+/// of its muscles that sees the foot jumps, when the foot lands, to the place
+/// it holds when the leg's strongest muscle starts a stroke. A landing then
+/// starts the stance push at once (Cruse: touchdown triggers stance), and the
+/// leg keeps its timing relative to its strongest muscle.
 fn landing_starts_stroke(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = pick(&sensing_legs(c), rng) else {
         return false;
@@ -204,9 +204,10 @@ fn landing_starts_stroke(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     arm(c, &leg, at_stroke_start)
 }
 
-/// A leg that senses its foot restarts its muscles close to the end of their
-/// contraction when the foot lands, so the stance is cut short and the foot
-/// lifts soon after loading. It gives a quick, light step as in running
+/// Gives one random leg whose foot a muscle can sense a landing reflex that
+/// restarts each of those muscles 0.05 to 0.15 of a cycle before the end of
+/// its contraction (cycle position `duty`). The stance is cut short, so the
+/// foot lifts soon after loading. It gives a quick, light step as in running
 /// animals, where stance is short (Alexander's duty factor below one half).
 fn quick_lift_reflex(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = pick(&sensing_legs(c), rng) else {
@@ -216,10 +217,11 @@ fn quick_lift_reflex(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     arm(c, &leg, |m, _| m.duty - early)
 }
 
-/// A small muscle runs from the foot bone of one leg to the hip bone of the
-/// nearest other leg and fires when the first foot lands, so the landing of
-/// one leg kicks the swing or push of the other directly through the body
-/// (Cruse's rule that a leg's touchdown triggers its neighbour).
+/// Adds a bridge muscle from the foot bone of a random leg to the top bone of
+/// the other leg whose foot is nearest to that foot along x. It fires when the
+/// first foot lands, so the landing of one leg kicks the swing or push of the
+/// other directly through the body (Cruse's rule that a leg's touchdown
+/// triggers its neighbour).
 fn cross_leg_trigger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     if legs.len() < 2 {
@@ -232,10 +234,11 @@ fn cross_leg_trigger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Contex
     bridge(c, cfg, &legs[k], legs[j][0], rng)
 }
 
-/// The next leg back is put half a cycle behind a leg, and the front leg's
-/// landing triggers it through a bridge muscle: the hind leg steps after the
-/// fore leg touches down, as in the walking cat and dog where the hind foot
-/// lands where the fore foot just was.
+/// The leg behind a random leg (any but the rearmost) is put half a cycle from
+/// it, and the front leg's landing fires a bridge muscle on the top bone of
+/// the hind leg. The hind leg then steps after the fore leg touches down, as
+/// in the walking cat and dog where the hind foot lands where the fore foot
+/// just was.
 fn fore_to_hind_trigger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     if legs.len() < 2 {
@@ -249,10 +252,11 @@ fn fore_to_hind_trigger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     bridge(c, cfg, &legs[k], legs[k - 1][0], rng) | moved
 }
 
-/// Two neighbouring legs trigger each other: each one's landing fires a
-/// bridge muscle on the other, and the second leg is put half a cycle after
-/// the first. It is the half-centre pair of a central pattern generator with
-/// the coupling carried by the feet, so the two legs alternate and keep to it.
+/// Two neighbouring legs trigger each other. Each leg's landing fires a bridge
+/// muscle on the other, and the front leg of the pair is put half a cycle from
+/// the rear one. It is the half-centre pair of a central pattern generator
+/// with the coupling carried by the feet, so the two legs alternate and keep
+/// to it.
 fn mutual_leg_trigger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     if legs.len() < 2 {
@@ -268,11 +272,11 @@ fn mutual_leg_trigger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Conte
     moved | forward | back
 }
 
-/// Every leg that can sense its foot gets a landing reflex, and the legs are
-/// put on a travelling wave from the foremost back: each leg's stroke starts
-/// an equal share of a cycle (a quarter, or one over the leg count) after the
-/// one in front. It is the metachronal wave of a many-legged walker, held
-/// together by reflexes.
+/// Puts the legs on a travelling wave and gives every leg whose foot a muscle
+/// can sense a landing reflex. Each leg's stroke starts an equal share of a
+/// cycle (a quarter, or one over the leg count) before the stroke of the leg
+/// in front of it, so the wave runs from the rearmost leg to the foremost. It
+/// is the metachronal wave of a many-legged walker, held together by reflexes.
 fn reflex_wave_along_legs(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     if legs.len() < 2 {
@@ -294,11 +298,13 @@ fn reflex_wave_along_legs(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &
     changed
 }
 
-/// Legs take turns: counted along the body, every other leg is put half a
-/// cycle behind the first, and each gets a landing reflex that restarts its
-/// stroke. Neighbours then alternate as in a trot or a walk (the contralateral
-/// half-cycle rule of Cruse and of Sims' mirrored limbs), and the reflex holds
-/// the alternation when the body speeds up or slows down.
+/// Legs take turns. Counted from the rear, the legs of one parity take the
+/// phase of a reference leg (one of the two rearmost, picked at random) and the
+/// legs of the other parity are put half a cycle from it. Each leg gets a
+/// landing reflex that restarts its stroke. Neighbours then alternate as in a
+/// trot or a walk (the contralateral half-cycle rule of Cruse and of Sims'
+/// mirrored limbs), and the reflex holds the alternation when the body speeds
+/// up or slows down.
 fn alternate_legs_with_reflex(
     c: &mut Creature,
     _cfg: &Config,
