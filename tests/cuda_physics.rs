@@ -1,10 +1,14 @@
-//! Physics checks on the CUDA kernel, the physics authority: bodies stay on
-//! the ground, joints stay in range, a body without drive does not travel or
-//! rise, and a creature scores the same in any batch.
+//! Physics checks on the CUDA kernel, the only physics: frozen muscles act
+//! like unpowered ones, overlapping nodes stay finite, a creature scores the
+//! same in any batch, nodes stay on top of rough ground, joints keep their
+//! range and do not spin through a half turn, and a body without drive
+//! neither travels nor rises.
 //!
 //! Needs the RTX 4060 and is ignored by default. Run it with
 //!
 //!     cargo test --release --test cuda_physics -- --ignored
+/// The helpers the example tools share (`examples/common/mod.rs`). They open
+/// the GPU engine, score creatures and record replays.
 #[path = "../examples/common/mod.rs"]
 mod common;
 use evolution_simulator::{
@@ -16,7 +20,9 @@ use evolution_simulator::{
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// The GPU engine all tests of this file share. It also records replays.
+/// The GPU engine all tests of this file share, opened on first use. It also
+/// records replays. A test that fails while it holds the engine poisons the
+/// lock, and the next test takes the engine anyway.
 fn gpu() -> MutexGuard<'static, ThreadedEngine> {
     static GPU: OnceLock<Mutex<ThreadedEngine>> = OnceLock::new();
     GPU.get_or_init(|| Mutex::new(common::open().expect("the GPU")))
@@ -29,20 +35,26 @@ fn evaluate(pop: &Population, cfg: &Config) -> Vec<GpuResult> {
     common::score(&mut gpu(), pop, cfg).expect("GPU trials")
 }
 
+/// The distance in meters that one creature scores on its own. This is its
+/// fitness.
 fn evaluate_one(creature: &Creature, cfg: &Config) -> f32 {
     let mut pop = Population::default();
     pop.push(creature.clone());
     evaluate(&pop, cfg)[0].fitness
 }
 
-/// A creature's full trial recorded by the scoring kernel: node positions
-/// before every step and after the last, and its result.
+/// A creature's full trial recorded by the scoring kernel, and its result.
+/// Frame `physics::settle() + n` holds the node positions after `n` steps.
+/// The frames before it repeat the start pose.
 fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    // Opens the shared engine on first use, which makes it the replay GPU.
     drop(gpu());
     let recording = common::record(creature, cfg).expect("a GPU replay");
     (recording.frames, recording.result)
 }
 
+/// The settings the tests start from. They use a fixed seed, 32 creatures and
+/// 1 s trials on flat ground. A test overrides what it needs.
 fn config() -> Config {
     Config {
         population: 32,
@@ -52,6 +64,8 @@ fn config() -> Config {
     }
 }
 
+/// A muscle frozen at the target length it starts with has no drive. Its body
+/// scores the same as one whose muscles also have no stiffness.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn frozen_muscles_behave_like_unpowered_muscles() {
@@ -74,6 +88,8 @@ fn frozen_muscles_behave_like_unpowered_muscles() {
     );
 }
 
+/// Three nodes on the same point, joined by two bones shorter than a node is
+/// wide, still score a finite distance.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn overlapping_nodes_remain_finite() {
@@ -111,7 +127,8 @@ fn overlapping_nodes_remain_finite() {
 }
 
 /// A creature scores the same alone as in a batch of other body sizes, in
-/// any order.
+/// another order. Its fitness, ground contact and gait frequency match bit
+/// for bit.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn a_creature_scores_the_same_in_any_batch() {
@@ -124,6 +141,8 @@ fn a_creature_scores_the_same_in_any_batch() {
         min_friction: 0.0,
         ..config()
     };
+    // Eight bodies of different sizes. Each has its nodes on a circle, joined
+    // in a chain by bones, with muscles between neighboring bones.
     let mut mixed = Population::default();
     for (i, count) in [3, 5, 6, 8, 9, 17, 24, 32].into_iter().enumerate() {
         let nodes: Vec<_> = (0..count)
@@ -210,6 +229,10 @@ fn a_creature_scores_the_same_in_any_batch() {
     }
 }
 
+/// On rough ground with a slope, no node sinks more than 2 cm below its floor
+/// in any frame recorded after a step. A node's floor is the height of its
+/// center when it rests on the ground, which depends on its radius and the
+/// local slope.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn nodes_stay_on_top_of_rough_ground() {
@@ -230,8 +253,9 @@ fn nodes_stay_on_top_of_rough_ground() {
                 let (height, slope) = physics::terrain_with_slope(node[0], amplitude, cfg.slope);
                 let floor = height + gene.diameter * 0.5 * (1.0 + slope * slope).sqrt();
                 assert!(
-                    // Contacts push a sunk node out by a fifth of its depth
-                    // per step, so a node may sit a little inside.
+                    // The kernel moves a sunk node back out along the
+                    // ground's normal in every substep, so a node can sit
+                    // only a little inside the floor computed here.
                     node[1] >= floor - 0.02,
                     "node sank to {} below {floor}",
                     node[1]
@@ -241,13 +265,17 @@ fn nodes_stay_on_top_of_rough_ground() {
     }
 }
 
-/// Angle at `pivot` from the reference end to the child end.
+/// Signed angle (rad) at node `pivot` from the direction of node `reference`
+/// to the direction of node `child`, for the node positions `p` of one frame.
 fn joint_angle(p: &[[f32; 2]], pivot: usize, reference: usize, child: usize) -> f32 {
     let u = [p[reference][0] - p[pivot][0], p[reference][1] - p[pivot][1]];
     let v = [p[child][0] - p[pivot][0], p[child][1] - p[pivot][1]];
     (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1])
 }
 
+/// A joint stays within the range its bone carries. The test narrows every
+/// range to 0.3 rad on each side of the start pose and checks each frame up
+/// to the fall or the break.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn joints_stay_within_their_evolved_range() {
@@ -260,6 +288,7 @@ fn joints_stay_within_their_evolved_range() {
     let mut worst = 0.0f32;
     for i in 0..pop.genomes.len() {
         let mut creature = pop.creature(i);
+        // Every joint may turn 0.3 rad either way from its start pose.
         for bone in &mut creature.bones {
             bone.min_angle = -0.3;
             bone.max_angle = 0.3;
@@ -267,8 +296,8 @@ fn joints_stay_within_their_evolved_range() {
         let joints = physics::joints(&creature.nodes, &creature.bones);
         let start: Vec<[f32; 2]> = creature.nodes.iter().map(|n| [n.x, n.y]).collect();
         let (frames, result) = replay(&creature, &cfg);
-        // The trial ends when the head falls or a joint breaks; a limp body
-        // may fold any way afterwards.
+        // Scoring ends when the head falls or a joint breaks. The recording
+        // goes on with limp muscles, and a limp body may fold any way.
         let end = if result.fall_time > 0.0 {
             physics::settle() as usize
                 + (result.fall_time * physics::rate() as f32).round() as usize
@@ -284,6 +313,8 @@ fn joints_stay_within_their_evolved_range() {
             let (pivot, child) = (bone.a as usize, bone.b as usize);
             let rest = joint_angle(&start, pivot, reference, child);
             for frame in &frames[..end] {
+                // The joint's turn from its start pose, wrapped to a half
+                // turn either way.
                 let offset = (joint_angle(frame, pivot, reference, child) - rest
                     + std::f32::consts::PI)
                     .rem_euclid(std::f32::consts::TAU)
@@ -292,12 +323,14 @@ fn joints_stay_within_their_evolved_range() {
             }
         }
     }
-    // A joint can pass its limit for a few steps; beyond
-    // physics::JOINT_BREAK the joint breaks and the trial ends, far from the
-    // half turn a wheel would need.
+    // A joint can pass its limit for a few steps. Past `physics::JOINT_BREAK`
+    // (0.5 rad) it breaks and scoring ends. The bound is far from the half
+    // turn a wheel would need.
     assert!(worst < 0.75, "a joint left its range by {worst} rad");
 }
 
+/// With the widest joint ranges, no joint turns through a half turn from its
+/// start pose in any frame of a trial.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn full_joint_ranges_do_not_spin_through_a_half_turn() {
@@ -322,6 +355,9 @@ fn full_joint_ranges_do_not_spin_through_a_half_turn() {
             };
             let (pivot, child) = (bone.a as usize, bone.b as usize);
             let mut previous = joint_angle(&frames[0], pivot, reference, child);
+            // The joint's total turn since the first frame, summed from its
+            // change between frames. A joint that spins keeps adding up
+            // instead of wrapping at a half turn.
             let mut unwrapped = 0.0f32;
             for frame in &frames[1..] {
                 let current = joint_angle(frame, pivot, reference, child);
@@ -382,6 +418,7 @@ fn a_passive_body_never_rises_above_its_start() {
         let masses: Vec<f32> = physics::nodes(&creature).iter().map(|n| n.mass).collect();
         let total: f32 = masses.iter().sum();
         let (frames, _) = replay(&creature, &cfg);
+        // The height of the body's center of mass in one frame.
         let height = |frame: &Vec<[f32; 2]>| {
             frame
                 .iter()
@@ -390,6 +427,7 @@ fn a_passive_body_never_rises_above_its_start() {
                 .sum::<f32>()
                 / total
         };
+        // The start is the first frame recorded after a step.
         let start = height(&frames[settle + 1]);
         let highest = frames[settle + 1..]
             .iter()
