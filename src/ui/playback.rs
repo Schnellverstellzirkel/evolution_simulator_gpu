@@ -1,5 +1,8 @@
-//! One creature's replay: the frames the scoring kernel recorded, the follow
-//! camera's track, and the marks the scene draws on each frame.
+//! One creature's replay. A `Playback` holds the frames the scoring kernel
+//! recorded, the follow camera's track and the replay clock. A `FrameMarks`
+//! holds what the scene draws over the pose of one frame. The viewport, the
+//! Race tab and the GIF export read a `Playback`, and `scene` draws its pose
+//! with the marks.
 
 use crate::{
     config::Config,
@@ -9,8 +12,9 @@ use crate::{
 };
 use std::time::Duration;
 
-/// How a trial ended early. The engines stop scoring at the first of three
-/// events; the replay names the one that happened.
+/// What ended a trial early. The scoring kernel stops a trial when the head
+/// falls, a joint breaks or the head shakes too hard, and the replay names
+/// which of the three it was.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Ending {
     /// The head dropped below its neck.
@@ -21,7 +25,8 @@ pub(super) enum Ending {
     Shook,
 }
 impl Ending {
-    /// Sentence for the replay, given the time of the event in seconds.
+    /// The sentence the viewport shows once the replay reaches the event,
+    /// given the time of the event in seconds into the trial.
     pub(super) fn sentence(self, seconds: f32) -> String {
         match self {
             Self::Fell => format!("Fell over at {seconds:.1} s: head below its neck"),
@@ -29,7 +34,7 @@ impl Ending {
             Self::Shook => format!("Shook its head too hard at {seconds:.1} s (over 8 g)"),
         }
     }
-    /// A word or two for a race lane.
+    /// A word or two for a race lane once its creature has fallen.
     pub(super) fn short(self) -> &'static str {
         match self {
             Self::Fell => "fell",
@@ -38,37 +43,55 @@ impl Ending {
         }
     }
 }
-/// Replays a creature's trial as simulated by the evaluation engines.
+/// One creature's trial as the scoring kernel recorded it, and how far the
+/// replay has played. `nodes` holds the pose on screen.
 pub(super) struct Playback {
+    /// The creature, with its bones in canonical order.
     pub(super) creature: Creature,
+    /// The world the trial ran in.
     pub(super) config: Config,
+    /// The creature's nodes. Their positions are the pose on screen, which
+    /// `show` and `show_between` set.
     pub(super) nodes: Vec<Node>,
-    /// Node positions after each step, recorded by the scoring kernel.
+    /// `[frame][node]`: node positions, recorded by the scoring kernel. Frames
+    /// 0 to `physics::settle()` all show the start pose, and frame `settle() + n`
+    /// shows the pose after `n` steps. A replay without a recording has one
+    /// frame.
     pub(super) frames: Vec<Vec<[f32; 2]>>,
+    /// Index of the frame on screen.
     pub(super) tick: u32,
+    /// Replay time (s) that the player has added and not yet played as a
+    /// step. The player adds the time of each UI frame and takes one step's
+    /// time off for each step it plays. `blend` turns what is left into a
+    /// share of the next step.
     pub(super) accumulator: f32,
-    /// Frame at which the trial ended early (a fall, a broken joint, or a
-    /// shaken head), and the distance the trial kept from that moment.
+    /// The frame at which the trial ended early (a fall, a broken joint or a
+    /// shaken head), and the distance the kernel scored there. `None` when the
+    /// trial ran its full length.
     pub(super) fall: Option<(u32, f32)>,
-    /// Which of the three events ended the trial, when one did.
+    /// What ended the trial early. While `fall` is `None` it is `Fell` and
+    /// means nothing.
     pub(super) ending: Ending,
-    /// The distance the engine scored for this very recording.
+    /// The distance the kernel scored in the run that recorded these frames.
+    /// It is 0 for a replay without a recording.
     pub(super) distance: f32,
-    /// Where the follow camera looks at each frame: the body's center of
-    /// mass averaged over `CAMERA_WINDOW` seconds on either side. Every
-    /// frame is recorded in advance, so the average cancels the swing of
-    /// each stride without lagging behind a steady walk.
+    /// The x position (m) where the follow camera looks at each frame: the
+    /// body's center of mass averaged over `CAMERA_WINDOW` seconds on either
+    /// side. Every frame is recorded in advance, so the average cancels the
+    /// swing of each stride without lagging behind a steady walk.
     track: Vec<f32>,
-    /// Typical body height over the recording (m), for the default zoom.
+    /// Typical body height (m) over the scored frames, for the default zoom.
     pub(super) height: f32,
-    /// Highest point of the body over the recording (m).
+    /// Highest point of the body (m) over the scored frames.
     pub(super) peak: f32,
-    /// Muscle energy, muscle force and ground push per frame: recorded by the
-    /// engine, or rebuilt from the frames when it recorded none.
+    /// What the kernel recorded with each frame: muscle energy, muscle force,
+    /// ground push and broken joints. When it recorded none,
+    /// `replay_forces::analyze` estimates the first three from the frames.
     pub(super) forces: crate::replay_forces::Forces,
-    /// A still first pose while the recording runs.
+    /// Whether the replay is a still first pose while the recording runs.
     pub(super) preparing: bool,
-    /// A still first pose because the GPU did not record the replay.
+    /// Whether the replay is a still first pose because the GPU did not record
+    /// it.
     pub(super) unavailable: bool,
 }
 /// Half-width of the follow camera's average of the center of mass (s).
