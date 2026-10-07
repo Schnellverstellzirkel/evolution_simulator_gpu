@@ -1,11 +1,11 @@
-//! The loading screen: what the game is waiting for while its GPU opens and
-//! its kernels compile, with a creature walking in place and a line to read
-//! meanwhile. The progress comes from `crate::loading`.
-//!
-//! Every effect a world has is compiled into its own kernel, and the game's
-//! 100 wild islands each run in a world of their own, so a first start (or
-//! the first start of a new build) compiles about two hundred kernels. They
-//! are kept on disk afterwards and load in milliseconds.
+//! `App::loading_screen` in `ui.rs` calls this module to draw the loading card
+//! or the corner note, and both show the progress that `crate::loading`
+//! reports. The card covers the window while the GPU opens and the kernels
+//! compile, with a creature walking in place and a line to read. A start with
+//! no cached kernels compiles about fifty of them, because every effect a
+//! world has is compiled into its own kernel and the 100 wild islands run in
+//! worlds of their own. The compiled kernels stay on disk and load in
+//! milliseconds at the next start.
 
 use crate::loading::{Group, Progress};
 use crate::theme::{self, Theme, poster};
@@ -59,26 +59,34 @@ const MESSAGES: &[&str] = &[
 ];
 const MESSAGE_SECONDS: f32 = 4.0;
 
-/// Why the window is waiting.
+/// Why the window is waiting. `App::loading_screen` in `ui.rs` picks it.
 pub(super) enum Wait<'a> {
     /// The evaluation devices are opening.
     Opening,
-    /// The devices failed to open; the reason is given in the string.
+    /// The devices did not open. The string is the reason.
     Failed(&'a str),
-    /// The kernels of the starting worlds compile.
+    /// The kernels of the starting worlds are compiling.
     Starting,
-    /// A generation cannot start until the kernels of its world compile.
+    /// The first generation cannot start until the kernels of its world
+    /// compile.
     World,
 }
 
-/// What the card shows, and whether the player may close it.
+/// What `screen` draws: why the window waits, and when the game started.
 pub(super) struct Card<'a> {
+    /// Why the window is waiting. It sets the title, which progress shows and
+    /// whether the player may close the card.
     pub wait: Wait<'a>,
+    /// When the app started. The walker and the line of the moment count from
+    /// here.
     pub since: Instant,
 }
 
-/// Draws the loading screen over the window. Returns true when the player
-/// pressed the button that closes it.
+/// Draws the loading card over the whole window and returns true when the
+/// player pressed the button that closes it. The card shows the progress of the
+/// kernels that evolution waits for when `card.wait` is `Wait::World`, and the
+/// progress of the starting kernels otherwise. It asks for a repaint every
+/// 33 ms, so the walker keeps moving.
 pub(super) fn screen(ctx: &egui::Context, theme: Theme, card: &Card) -> bool {
     let progress = match card.wait {
         Wait::World => crate::loading::progress(Group::Needed),
