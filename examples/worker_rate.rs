@@ -1,23 +1,32 @@
-//! Runs the game's worker headless (the ring on the GPU) and prints the end
-//! to end creature rate, the peak resident memory, the ring's shape, how
-//! long the champion's replay took to record (asked every 5 s, as a player
-//! clicking it), and a digest of every generation's statistics, which two
-//! runs of one seed must share.
-//! With a fifth argument above 0 each press applies the next world preset
-//! (rough hills, icy slope, swamp, desert, obstacle course, heavy world, then
-//! the calm world) instead: most of them are several effects away, so their
-//! kernels are not ready yet.
-//! With a sixth argument the game opens that save instead of a new one (its
-//! population, world and archives), and `generations` counts from the saved
-//! generation: this measures an evolved population of big bodies.
+//! Runs the game's worker headless on the GPU and measures it end to end. It
+//! prints the creature rate, the page faults per generation, the peak resident
+//! memory and the ring's shape. It also times the champion's replay, which it
+//! asks for 5 s after the last one like a player clicking it, and prints a
+//! digest of every generation's statistics, which two runs of one seed must
+//! share.
+//!
 //! Usage: worker_rate [population] [generations] [seed] [button seconds] [presets] [save]
-//! With button seconds above 0 an effect button is pressed that often: wind,
-//! mud, water, ice patches, gaps and hurdles go on one after another, then
-//! off in reverse, so every press is one level away from the world before it.
-//! The stage log's world_change_discarded column shows what a world change
-//! throws away and its kernel_wait_seconds column what it waited for kernels;
-//! each press prints the kernel wait until the next one. The search then
-//! differs from a run without.
+//!
+//! The defaults are 1,000,000 creatures, 12 generations and seed 38. With
+//! `button seconds` above 0 an effect button is pressed every that many
+//! seconds. Wind, mud, water, ice patches, gaps and hurdles go on one after
+//! another, then off in reverse, so every press is one level away from the
+//! world before it. With `presets` above 0 each press applies the next preset
+//! of `environment::PRESETS` instead, and the press after the last preset
+//! returns to the calm world. Most presets are several effects away from the
+//! world before, so their kernels are not ready yet.
+//!
+//! With a `save` the game opens that save instead of a new one, with its
+//! population, world and archives. The save sets the population and the seed,
+//! and `generations` counts from the saved generation. This measures an evolved
+//! population of big bodies.
+//!
+//! A press changes the search, so a run with presses differs from one without.
+//! The stage log (`EVOLUTION_STAGE_LOG`) shows what a world change costs. Its
+//! `world_change_discarded` column counts the creatures a change threw away
+//! and its `kernel_wait_seconds` column the time the engines waited for
+//! kernels. Each press after the first also prints the kernel wait since the
+//! press before.
 use evolution_simulator::{
     config::Config,
     gpu::Gpu,
@@ -26,6 +35,7 @@ use evolution_simulator::{
 use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
+    // Argument `n` as a number, or `d` when it is missing.
     let arg = |n: usize, d: u64| {
         std::env::args()
             .nth(n)
@@ -42,6 +52,7 @@ fn main() -> anyhow::Result<()> {
         Some(path) => evolution_simulator::storage::check(path)?.generation as usize,
         None => 0,
     };
+    // A save has its own population.
     let population = match &save {
         Some(path) => evolution_simulator::storage::check(path)?.population as usize,
         None => population,
@@ -62,6 +73,7 @@ fn main() -> anyhow::Result<()> {
             population,
             seed,
             random_seed: false,
+            // No autosave.
             checkpoint_interval: 0,
             ..Config::default()
         })),
@@ -71,21 +83,23 @@ fn main() -> anyhow::Result<()> {
         guided: false,
     });
     let started = Instant::now();
+    // The time each generation count was first seen. The vectors of page fault
+    // and resident page counts below hold one entry for each mark.
     let mut marks: Vec<(usize, Instant)> = Vec::new();
-    // Minor page faults of the process at each generation mark, and the major
-    // ones (a page read back from swap, which another program's memory use
-    // can cause) kept apart.
+    // Minor and major page faults of the process so far. A major fault reads a
+    // page back from swap, which another program's memory use can cause.
     let stat_fields = || -> (u64, u64) {
         let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
-        // Fields after the command name: minflt is field 10, majflt field 12.
+        // Fields after the command name start at field 3. In proc(5) minflt is
+        // field 10 and majflt is field 12, so they sit at indexes 7 and 9.
         let rest = stat.rsplit_once(')').map_or("", |r| r.1);
         let f: Vec<&str> = rest.split_whitespace().collect();
         let n = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         (n(7), n(9))
     };
     let mut fault_marks: Vec<u64> = Vec::new();
-    // Resident pages at each mark: faults beyond the growth of the resident
-    // set faulted memory that was given back and faulted in again.
+    // Resident pages of the process now. Faults beyond the growth of this
+    // number touched memory that was given back and faulted in again.
     let resident = || -> u64 {
         std::fs::read_to_string("/proc/self/statm")
             .ok()
@@ -94,8 +108,9 @@ fn main() -> anyhow::Result<()> {
     };
     let mut resident_marks: Vec<u64> = Vec::new();
     let mut major_marks: Vec<u64> = Vec::new();
-    // The champion's replay, asked every 5 s from its own thread like the
-    // UI's replay thread.
+    // The champion's replay, asked for from its own thread like the UI's replay
+    // thread, 5 s after the last one ended. `replay_seconds` holds how long
+    // each replay took.
     type Champion = std::sync::Arc<(
         evolution_simulator::evolution::Creature,
         evolution_simulator::config::Config,
@@ -125,15 +140,21 @@ fn main() -> anyhow::Result<()> {
         })
     };
     let mut last_button = Instant::now();
+    // The buttons go to level 1 in this order, then back to level 0 in reverse.
     const BUTTONS: [&str; 6] = ["Wind", "Mud", "Water", "Ice patches", "Gaps", "Hurdles"];
     let mut presses = 0usize;
+    // The kernel wait at the last press, to print the wait between two presses.
     let mut wait_at_press = evolution_simulator::cuda_engine::kernel_wait_seconds();
+    // Takes each new snapshot, as the UI does, until the history holds enough
+    // generations.
     let history = loop {
         if let Some(snapshot) = worker.view.lock().unwrap().take() {
             anyhow::ensure!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            // Hands the newest champion to the replay thread.
             if snapshot.champion.is_some() {
                 *champion.lock().unwrap() = snapshot.champion.clone();
             }
+            // A press changes the world like the player's button does.
             if button > 0 && last_button.elapsed() >= Duration::from_secs(button) {
                 last_button = Instant::now();
                 let wait = evolution_simulator::cuda_engine::kernel_wait_seconds();
@@ -146,6 +167,8 @@ fn main() -> anyhow::Result<()> {
                 wait_at_press = wait;
                 let mut config = snapshot.config.clone();
                 if presets {
+                    // The next preset. After the last one every effect goes
+                    // back to calm, except the autochange, which stays.
                     let all = &evolution_simulator::environment::PRESETS;
                     let step = presses % (all.len() + 1);
                     if step < all.len() {
@@ -160,6 +183,7 @@ fn main() -> anyhow::Result<()> {
                         eprintln!("press {}: calm world", presses + 1);
                     }
                 } else {
+                    // The next button: on in order, then off in reverse.
                     let step = presses % (2 * BUTTONS.len());
                     let (name, level) = if step < BUTTONS.len() {
                         (BUTTONS[step], 1)
@@ -181,6 +205,7 @@ fn main() -> anyhow::Result<()> {
             if n < base {
                 continue;
             }
+            // A generation count not seen yet.
             if marks.last().is_none_or(|m| m.0 != n) {
                 marks.push((n, Instant::now()));
                 let (minor, major) = stat_fields();
@@ -204,10 +229,12 @@ fn main() -> anyhow::Result<()> {
                 break snapshot.history.clone();
             }
         }
+        // Gives up after 30 minutes.
         anyhow::ensure!(started.elapsed() < Duration::from_secs(1800), "too slow");
         let _ = ctx.run_ui(eframe::egui::RawInput::default(), |_| {});
         std::thread::sleep(Duration::from_millis(20));
     };
+    // Tells the replay thread to stop.
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(ring) = history.last().map(|s| s.ring) {
         println!(
@@ -215,7 +242,8 @@ fn main() -> anyhow::Result<()> {
             ring.blocks, ring.block
         );
     }
-    // Rate over the generations after the first two (warm-up).
+    // Rate over the generations after the first three, which are warm-up. The
+    // window runs from the mark of `base + 3` generations to the last mark.
     let first = marks.iter().find(|m| m.0 == base + 3).map(|m| m.1);
     let last = marks.last().map(|m| (m.0, m.1));
     if let (Some(first), Some((n, last))) = (first, last) {
@@ -226,6 +254,7 @@ fn main() -> anyhow::Result<()> {
             done as f64 / last.duration_since(first).as_secs_f64(),
             last.duration_since(first).as_secs_f64() / (n - base - 3) as f64
         );
+        // The entry of a vector of marks at generation count `g`, if it was seen.
         let at = |marks_of: &Vec<u64>, g: usize| {
             marks.iter().position(|m| m.0 == g).map(|i| marks_of[i])
         };
@@ -241,7 +270,8 @@ fn main() -> anyhow::Result<()> {
                     (b - a) as f64 / (n - base - 3) as f64
                 );
             }
-            // Per generation, the faults not accounted for by new resident memory.
+            // The faults not accounted for by new resident memory, summed over
+            // the generations of the window.
             let regen: u64 = (base + 4..=n)
                 .filter_map(|g| {
                     let i = marks.iter().position(|m| m.0 == g)?;
@@ -257,7 +287,8 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
-    // Every generation's statistics, bit for bit.
+    // A digest of every generation's statistics, bit for bit. Each generation
+    // also prints a line.
     use std::hash::{Hash, Hasher};
     let mut digest = std::collections::hash_map::DefaultHasher::new();
     for s in history.iter().skip(base).take(generations) {
@@ -280,6 +311,7 @@ fn main() -> anyhow::Result<()> {
         );
     }
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    // A field of `/proc/self/status` that is in kB, returned in GiB.
     let field = |name: &str| {
         status
             .lines()
@@ -298,10 +330,12 @@ fn main() -> anyhow::Result<()> {
         "worker_rate: engine threads waited {:.2} s for kernels",
         evolution_simulator::cuda_engine::kernel_wait_seconds()
     );
+    // The replay thread ends after its current sleep and any replay in flight.
     let _ = replays.join();
     let mut times = replay_seconds.lock().unwrap().clone();
     if !times.is_empty() {
         times.sort_by(f64::total_cmp);
+        // The time at quantile `q`, taking the nearest index.
         let at = |q: f64| times[((times.len() - 1) as f64 * q).round() as usize];
         println!(
             "worker_rate: {} replays, p50 {:.3} s, p95 {:.3} s, max {:.3} s",
