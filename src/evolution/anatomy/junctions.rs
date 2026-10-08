@@ -1,4 +1,7 @@
-//! Operators that restructure junctions and segments of the skeleton.
+//! This file holds eight anatomy operators. Six restructure the junctions and
+//! segments of the skeleton and two start a joint near one of its stops.
+//! `mod.rs` lists them in `BASE_OPERATORS`. The other anatomy files use the
+//! helpers here to add nodes, move or turn branches and keep muscle strokes.
 use super::rhythm::leaf_limbs_at;
 use super::{
     BoneIds, Context, branch, branch_nodes, child_bones, copy_branch, fit_stroke, is_neck,
@@ -7,9 +10,9 @@ use super::{
 use crate::config::Config;
 use crate::evolution::{Bone, Bounded, Creature, MAX_MUSCLES, Muscle, NodeGene, Rng};
 
-/// Where three or more bones meet, puts a short new bone between the node
-/// and a new node, and moves some of the child branches to the new node, so
-/// a crowded junction becomes two joints (a shoulder and a hip region).
+/// Where three or more bones meet, adds a short bone from that node to a new
+/// node and moves some of the child branches onto the new node, so one crowded
+/// junction becomes two.
 pub(crate) fn split_crowded_joint(
     c: &mut Creature,
     cfg: &Config,
@@ -32,7 +35,8 @@ pub(crate) fn split_crowded_joint(
     }
     let moved = &kids[..1 + rng.index(kids.len() - 1)];
     // The new bone points toward the moved branches and is a fraction of
-    // their length. The moved branches slide out by it and keep their shape.
+    // their mean length. The moved branches slide out by it and keep their
+    // shape.
     let mut toward = [0.0; 2];
     let mut length = 0.0;
     for &b in moved {
@@ -51,9 +55,10 @@ pub(crate) fn split_crowded_joint(
     true
 }
 
-/// Collapses a short bone between two junctions (its child node has two or
-/// more child bones) so its child branches meet at the parent node. Muscles
-/// on the removed bone move to a neighbouring bone or go.
+/// Removes a bone whose child node is a junction (it has two or more child
+/// bones), so those child branches hang from the removed bone's parent node.
+/// Muscle ends on the removed bone move to the tip of the bone above it. A
+/// muscle that then joins that bone to itself is dropped.
 pub(crate) fn merge_branch_joints(
     c: &mut Creature,
     _cfg: &Config,
@@ -86,8 +91,9 @@ pub(crate) fn merge_branch_joints(
         c.bones[child].a = a as u32;
         shift_branch(c, child, offset);
     }
-    // Ends on the removed bone move to the joint at the tip of the bone
-    // above. A muscle that then joins that bone to itself goes.
+    // Muscle ends on the removed bone move to the joint at the tip of the
+    // bone above. `remove_parts` then drops a muscle that joins that bone to
+    // itself.
     for m in &mut c.muscles {
         if m.bone_a as usize == bone {
             m.bone_a = above as u32;
@@ -98,14 +104,19 @@ pub(crate) fn merge_branch_joints(
             m.anchor_b = 1.0;
         }
     }
+    // `keep_strokes` matches muscles by index, so it runs before
+    // `remove_parts` drops any.
     keep_strokes(c, &before);
     remove_parts(c, &[bone], &[b]);
     true
 }
 
-/// Copies a trunk bone (one with child bones) together with the leaf limbs
-/// on its child node and their muscles, and inserts the copy after it in the
-/// chain: a route to segmented, many-legged bodies.
+/// Copies a trunk bone together with the leaf limbs on its child node and their
+/// muscles, and inserts the copy after it in the chain. A trunk bone is a bone
+/// other than the neck whose child node has leaf limbs. The rest of the body
+/// below the trunk then hangs from the copy. Copied muscles shift their phase
+/// by the same random number of quarter cycles, from none to three. It builds
+/// segmented, many-legged bodies one segment at a time.
 pub(crate) fn repeat_body_segment(
     c: &mut Creature,
     cfg: &Config,
@@ -186,9 +197,10 @@ pub(crate) fn repeat_body_segment(
     true
 }
 
-/// Turns a limb tip into a heel and a toe: two short bones from the tip, one
-/// pointing forward and one back, with their own joint ranges and a muscle
-/// from each to the tip bone.
+/// Grows a toe and a heel on a limb tip: two short bones from the tip node, one
+/// pointing forward (+x) and one back, each with a narrow joint range and a
+/// muscle to the bone that ends at the tip. Both muscles copy the rhythm of one
+/// muscle on that bone, or get a random rhythm if it has none.
 pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
@@ -217,9 +229,9 @@ pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
     true
 }
 
-/// Grows a short bone with a narrow joint range from a joint node, and moves
-/// one attachment of a muscle on a bone at that joint onto the new bone's
-/// tip. A lever that changes the muscle's leverage (like an elbow process).
+/// Grows a short bone with a narrow joint range from a joint node and moves one
+/// end of a muscle on a bone at that joint onto the tip of the new bone. The
+/// spur is a lever that changes the muscle's leverage, like an elbow process.
 pub(crate) fn grow_lever_spur(
     c: &mut Creature,
     cfg: &Config,
@@ -279,8 +291,9 @@ pub(crate) fn grow_lever_spur(
 }
 
 /// Reflects a branch across the line of its root bone and swaps and negates
-/// the joint limits inside it, so the limb bends the other way. Anchors along
-/// bones stay, so its muscles keep their roles.
+/// the joint limits of the bones below the root, so the limb bends the other
+/// way. The root bone stays as it is. Muscle anchors are positions along
+/// bones, so the muscles keep their roles.
 pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     // The root bone lies on the mirror line and keeps its joint, so a branch
