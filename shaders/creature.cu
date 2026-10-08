@@ -825,9 +825,15 @@ struct Lane {
 #endif
 };
 
-// Creatures a warp claims from the wave's counter at a time. It may not be
-// more than 32, because `advance` tests one creature of a chunk per lane.
+// Most creatures a warp claims from the wave's counter at a time. It may not
+// be more than 32, because `advance` tests one creature of a chunk per lane.
+// A claim is smaller when the wave is nearly done: at most 1 / CHUNK_K of the
+// creatures that are left for each warp, and at least 1. The last creatures
+// of a wave are the largest bodies and the slowest to finish, and so they are
+// spread over all the warps instead of waiting for a warp that has claimed
+// 32 of them.
 #define CHUNK 32u
+#define CHUNK_K 4u
 
 // Whether creature `cidx` has more than NS nodes, so that it runs in mode 1.
 __device__ __forceinline__ bool is_big(const uint4* __restrict__ heads, unsigned cidx) {
@@ -1242,8 +1248,8 @@ __device__ __forceinline__ void run_step(
 }
 
 // One thread per creature: runs its trial and tallies its behavior. A warp
-// claims runs of CHUNK creatures from the wave's counter, and its lanes take
-// creatures from the claim as they free up. The host sorts creatures by
+// claims runs of up to CHUNK creatures from the wave's counter, and its lanes
+// take creatures from the claim as they free up. The host sorts creatures by
 // their muscles and then their nodes, so a claim holds alike bodies. A warp
 // runs bodies of one class at a time: mode 0 for those of at most NS nodes
 // and mode 1, with half its lanes, for the others.
@@ -1314,15 +1320,23 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 continue;
             }
             if (chunk_cur >= chunk_end) {
-                // The chunk is used up. Lane 0 claims the next CHUNK creatures
-                // of the wave, and the claims end when the counter is past it.
+                // The chunk is used up. Lane 0 claims the next creatures of the
+                // wave (see CHUNK), and the claims end when the counter is past
+                // it.
                 if (claimed_all) { break; }
-                unsigned c0 = 0u;
-                if (lane == 0u) { c0 = atomicAdd(counter, CHUNK); }
+                unsigned c0 = 0u, want = CHUNK;
+                if (lane == 0u) {
+                    // The counter read is not exact, and any claim is valid.
+                    const unsigned seen = *reinterpret_cast<volatile unsigned*>(counter);
+                    const unsigned left = seen < p.count ? p.count - seen : 0u;
+                    want = min(max(left / (CHUNK_K * (gridDim.x * (BLOCK / 32u))), 1u), CHUNK);
+                    c0 = atomicAdd(counter, want);
+                }
                 c0 = __shfl_sync(FULL, c0, 0);
+                want = __shfl_sync(FULL, want, 0);
                 if (c0 >= p.count) { claimed_all = true; break; }
                 chunk_cur = c0;
-                chunk_end = min(c0 + CHUNK, p.count);
+                chunk_end = min(c0 + want, p.count);
             }
             // The run of one class that the chunk starts with.
             const bool big = is_big(heads, p.base + chunk_cur);
