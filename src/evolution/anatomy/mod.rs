@@ -546,8 +546,8 @@ pub(super) fn remove_parts(c: &mut Creature, bones: &[usize], nodes: &[usize]) {
     });
 }
 
-/// New index of each of `len` items after `removed` go (`usize::MAX` for a
-/// removed one).
+/// The new index of each of `len` items once the ones in `removed` are taken
+/// out, or `usize::MAX` for a removed item.
 fn renumber(len: usize, removed: &[usize]) -> BoneIds {
     let mut map = BoneIds::filled(len, 0);
     let mut next = 0;
@@ -569,8 +569,8 @@ pub(super) fn span(c: &Creature, m: &Muscle) -> f32 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
-/// Sets a muscle's stroke around its span in the pose, keeping the ratios of
-/// `short` and `long` to the span that `template` has (or 0.8 and 1.1).
+/// Sets a muscle's stroke from its span in the pose. `short` and `long` keep
+/// the ratios to the span that `template` has, or 0.8 and 1.1 without one.
 pub(super) fn fit_stroke(c: &Creature, m: &mut Muscle, template: Option<&Muscle>) {
     let (short, long) = template
         .map(|t| {
@@ -583,9 +583,10 @@ pub(super) fn fit_stroke(c: &Creature, m: &mut Muscle, template: Option<&Muscle>
     m.long = (length * long).max(m.short);
 }
 
-/// A new muscle from `bone_a` to `bone_b` with the given anchors. Its rhythm
-/// (period, phase, duty, stiffness, sensor, reset) comes from `template`, or
-/// is random without one; its stroke fits its span.
+/// A new muscle from `bone_a` to `bone_b`. Its anchors are `anchors`, kept
+/// between 0 and 1. Its period, phase, duty, stiffness, sensor, reset and
+/// tendon come from `template`, or from a new random muscle without one. Its
+/// stroke fits its span (`fit_stroke`).
 pub(super) fn new_muscle(
     c: &Creature,
     bone_a: usize,
@@ -606,13 +607,13 @@ pub(super) fn new_muscle(
     m
 }
 
-/// Copies the branch that starts at `bone` onto node `at`, placing each
-/// copied node at `place(original position)`. The copy brings its joint
-/// ranges (mirrored with `mirror`) and every muscle inside the branch, plus
-/// the muscles from the branch root to the bone above it, reattached to the
-/// bone above `at` when there is one. Copied muscles shift their phase by
-/// `phase`. Returns the new root bone, or
-/// `None` without room.
+/// Copies the branch that starts at `bone` onto node `at`. Each copied node
+/// goes to `place(original position)`, and each copied bone keeps its joint
+/// range, mirrored when `mirror` is set. The copy brings every muscle inside
+/// the branch. It also brings the hinge muscles, which join the branch root to
+/// the bone above it, and attaches them to the bone above `at`, but only when
+/// both of those bones exist. Copied muscles shift their phase by `phase`.
+/// Returns the new root bone, or `None` when the body has no room.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_branch(
     c: &mut Creature,
@@ -626,8 +627,9 @@ pub(super) fn copy_branch(
     copy_branch_limited(c, cfg, bone, at, place, mirror, phase, usize::MAX)
 }
 
-/// `copy_branch` that brings at most `quota` muscles: when the branch and
-/// its hinge have more, the copy keeps the ones with the most drive.
+/// `copy_branch` that brings at most `quota` muscles. When the branch and its
+/// hinge muscles have more, the copy keeps the ones with the most drive
+/// (`extra::drive`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_branch_limited(
     c: &mut Creature,
@@ -668,6 +670,8 @@ pub(super) fn copy_branch_limited(
     let mut new_bone = [usize::MAX; MAX_NODES];
     let mut new_node = [usize::MAX; MAX_NODES];
     new_node[c.bones[bone].a as usize] = at;
+    // `bones` lists parents before children, so the parent node of each bone is
+    // already mapped when its turn comes.
     for &b in &bones {
         let old = c.bones[b];
         let child = old.b as usize;
@@ -694,6 +698,8 @@ pub(super) fn copy_branch_limited(
             ..old
         });
     }
+    // A muscle end on a copied bone moves to its copy. Any other end is on the
+    // bone above the branch root (a hinge muscle) and moves to the bone above `at`.
     let remap = |b: u32| -> u32 {
         match new_bone[b as usize] {
             usize::MAX => above_target.expect("hinge muscles need a bone above") as u32,
@@ -718,7 +724,8 @@ mod tests {
     use super::*;
     use crate::evolution::{Population, grow_for_benchmark, random_creature_from, repair};
 
-    /// Repaired bodies of 3 to 16 nodes grown with the classic operators.
+    /// `count` repaired bodies, each grown with the classic operators toward 3
+    /// to 16 nodes (at most `cfg.max_nodes`).
     pub(super) fn bodies(cfg: &Config, count: usize) -> Vec<Creature> {
         (0..count)
             .map(|i| {
@@ -736,12 +743,15 @@ mod tests {
         bodies(&Config::default(), 160)
     }
 
-    /// Whether two phases are the same point of the cycle.
+    /// Whether two phases are the same point of the cycle, to within 1e-4.
     pub(super) fn same_phase(a: f32, b: f32) -> bool {
         let d = (a - b).rem_euclid(1.0);
         !(1e-4..=1.0 - 1e-4).contains(&d)
     }
 
+    /// Operator names are unique, every name in `SHARED_SLOT` and
+    /// `CONTROLLER_SLOT` is an operator, and the pick slots together hold each
+    /// operator once.
     #[test]
     fn operator_names_are_unique() {
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
@@ -831,8 +841,8 @@ mod tests {
         }
     }
 
-    /// Bodies at the default caps: grown toward 32 nodes and filled toward
-    /// 96 muscles, where the bounded arrays are full.
+    /// Bodies at the default caps: grown toward 22 to 32 nodes and filled toward
+    /// 93 to 96 muscles, where the bounded arrays are full or nearly full.
     fn full_bodies(cfg: &Config, count: usize) -> Vec<Creature> {
         (0..count)
             .map(|i| {
@@ -931,8 +941,9 @@ mod tests {
                 if !apply(index, &mut c, &cfg, &mut rng, &cx) {
                     continue;
                 }
-                // Breeding follows with a parameter mutation; the game test
-                // at these limits uses mutation 5.
+                // Breeding follows with a parameter mutation. 0.175 is its
+                // scale of 0.035 at mutation strength 5, which the game test
+                // `mutation_keeps_valid_graphs_at_limits` uses at these limits.
                 c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.175);
                 repair(&mut c, &cfg, &mut rng);
                 let mut pop = Population::default();
