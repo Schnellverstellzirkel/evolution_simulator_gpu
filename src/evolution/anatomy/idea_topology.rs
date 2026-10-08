@@ -208,8 +208,12 @@ fn fork_tip(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> boo
     true
 }
 
-/// Scales the bones of the trunk (bones whose child has bones below it, apart
-/// from the neck) and refits the strokes of the muscles on them.
+/// Scales by `by` every bone that has bones below its child node, apart from
+/// the neck. That is the trunk and also the upper bones of limbs of two bones or
+/// more. Each of these bones keeps its direction and takes its new length (held
+/// between 0.05 m and the longest bone), and its child node moves with every
+/// node below it. Then every muscle refits its stroke so that it keeps its
+/// shares of its span. Returns false when no bone qualifies.
 fn scale_trunk(c: &mut Creature, by: f32) -> bool {
     let children = child_bones(c);
     let trunk: BoneIds = (0..c.bones.len())
@@ -218,7 +222,8 @@ fn scale_trunk(c: &mut Creature, by: f32) -> bool {
     if trunk.is_empty() {
         return false;
     }
-    // Strokes keep their share of the span they act across.
+    // Each stroke keeps its shares of the span it acts across. The shares are
+    // read here, before any node moves.
     let ratios: Vec<(f32, f32)> = c
         .muscles
         .iter()
@@ -232,7 +237,8 @@ fn scale_trunk(c: &mut Creature, by: f32) -> bool {
         let bone = &mut c.bones[b];
         let (a, z) = (bone.a as usize, bone.b as usize);
         bone.rest_length = length;
-        // Move the child side of the bone with it so spans see the change.
+        // Move the bone's child node along the bone to the new length, so that
+        // spans see the change.
         let (dx, dy) = (c.nodes[z].x - c.nodes[a].x, c.nodes[z].y - c.nodes[a].y);
         let now = dx.hypot(dy).max(1.0e-6);
         let (nx, ny) = (
@@ -240,7 +246,7 @@ fn scale_trunk(c: &mut Creature, by: f32) -> bool {
             c.nodes[a].y + dy / now * length,
         );
         let (mx, my) = (nx - c.nodes[z].x, ny - c.nodes[z].y);
-        // The whole branch below the child shifts with it.
+        // The child node and every node below it shift by the same amount.
         for node in super::branch_nodes(c, &super::branch(c, b)) {
             c.nodes[node].x += mx;
             c.nodes[node].y = (c.nodes[node].y + my).max(0.0);
@@ -254,19 +260,23 @@ fn scale_trunk(c: &mut Creature, by: f32) -> bool {
     true
 }
 
-/// The trunk's bones grow by 12 to 25%: a longer body between the same legs.
+/// The bones that `scale_trunk` scales grow by 12 to 25%: a longer body.
 fn lengthen_trunk(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     scale_trunk(c, rng.range(1.12, 1.25))
 }
 
-/// The trunk's bones shrink by 10 to 20%: a compact body.
+/// The bones that `scale_trunk` scales shrink by 10 to 20%: a compact body.
 fn shorten_trunk(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     scale_trunk(c, rng.range(0.8, 0.9))
 }
 
 /// The foremost and the rearmost feet become the ends of an inchworm: the
-/// front slides, the rear grips, and a long muscle between their bones
-/// stretches and pulls the body along (Hirose 1993).
+/// front gets the lowest grip so it slides, the rear gets the highest so it
+/// holds, and a long muscle between their bones stretches and pulls the body
+/// along (Hirose 1993). The muscle is anchored at the two feet. It has the
+/// timing of a random muscle at a duty of 0.5, no tendon and a stiffness of at
+/// least 60. Does nothing when the feet are on one bone or less than 10 cm
+/// apart along x.
 fn inchworm_ends(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -289,6 +299,8 @@ fn inchworm_ends(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -
     }
     c.nodes[front].friction = cfg.min_friction;
     c.nodes[rear].friction = cfg.max_friction;
+    // The grips are set already, so a body with no muscle is changed here and
+    // still returns false.
     if c.muscles.is_empty() {
         return false;
     }
@@ -301,8 +313,10 @@ fn inchworm_ends(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -
     true
 }
 
-/// A leg is copied twice onto its own hip, a third and two thirds of a cycle
-/// behind, so one leg becomes a three-beat group.
+/// A leg that has a muscle is copied twice onto its own hip, a third and two
+/// thirds of a cycle behind, so one leg becomes a three-beat group. The first
+/// copy is shifted 0.1 m forward or back and the second 0.2 m, a direction
+/// drawn for each. Each brings at most as many muscles as touch the leg.
 fn tripod_copy(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
     let driven: BoneIds = (0..legs.len())
@@ -335,8 +349,9 @@ fn tripod_copy(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> 
     made
 }
 
-/// The shortest leaf bone goes if it is under 7 cm: a stub that carries no
-/// foot and only adds mass.
+/// The shortest leaf bone goes with its node and its muscles, if it is under
+/// 7 cm and not the neck: a stub that carries no foot and only adds mass. Does
+/// nothing to a body of 4 nodes or fewer.
 fn drop_shortest_stub(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.nodes.len() <= 4 {
         return false;
@@ -358,8 +373,12 @@ fn drop_shortest_stub(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Con
     true
 }
 
-/// A stiff, nearly fixed muscle joins two neighbouring trunk bones, with a
-/// tendon at full strength: the joint between them becomes a rigid frame.
+/// A stiff, nearly fixed muscle joins two bones that meet at a joint, a bone and
+/// one that hangs from its far end, in the trunk or in a limb. It is anchored at
+/// 0.7 of the first bone and 0.3 of the second. It has a stiffness of 100, the
+/// stiffest tendon, a stroke of 1 cm and the timing of a random muscle, so the
+/// joint between the bones becomes a rigid frame. Does nothing when a muscle
+/// joins the pair already.
 fn brace_trunk_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -393,7 +412,10 @@ fn brace_trunk_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context
 }
 
 /// A weak, springy muscle links the tips of two different legs, so one leg's
-/// stretch pulls on the other's.
+/// stretch pulls on the other's. It is anchored at 0.8 of the last bone of each
+/// leg. It has the timing of a random muscle, at 0.4 times its stiffness (1 at
+/// least) and with a tendon of 0.6 to 1.0. The two legs are drawn independently,
+/// and the operator does nothing when they are the same one.
 fn leg_link_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -414,13 +436,16 @@ fn leg_link_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context)
     template.tendon = rng.range(0.6, 1.0);
     template.stiffness = (template.stiffness * 0.4).max(1.0);
     let mut m = new_muscle(c, bx, by, (0.8, 0.8), Some(&template), rng);
+    // `new_muscle` has fitted this stroke with this template already, so this
+    // call gives the same stroke again.
     fit_stroke(c, &mut m, Some(&template));
     c.muscles.push(m);
     true
 }
 
-/// The leaf farthest from the head goes, with its bone: a tail or toe that
-/// only drags.
+/// The leaf farthest from the head goes with its bone and the muscles on that
+/// bone: a tail or toe that only drags. Does nothing to a body of 4 nodes or
+/// fewer.
 fn shed_tail_tip(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.nodes.len() <= 4 {
         return false;
