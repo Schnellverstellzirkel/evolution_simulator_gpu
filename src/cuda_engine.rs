@@ -451,10 +451,44 @@ impl std::error::Error for CudaError {}
 /// that opens later reports it again.
 static API: std::sync::OnceLock<Result<Arc<Api>, String>> = std::sync::OnceLock::new();
 
+/// Hardware queues for the process's streams, set unless the environment
+/// already has `CUDA_DEVICE_MAX_CONNECTIONS` (1 to 32). CUDA puts every stream
+/// on one of 8 queues by default, and kernels on streams that share a queue
+/// run one after the other. The engine has two streams for each slot, and the
+/// 100 wild islands make about 800 small units a generation, so with 12 slots
+/// only 3 or 4 of those ran at once. The driver reads the variable when it
+/// starts.
+const HARDWARE_QUEUES: &str = "32";
+
+/// What `prepare_environment` sets, given the value the variable has now:
+/// `HARDWARE_QUEUES` when it has none, and nothing when a developer set one.
+fn queues_to_set(current: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    current.is_none().then_some(HARDWARE_QUEUES)
+}
+
+/// Sets `CUDA_DEVICE_MAX_CONNECTIONS` to `HARDWARE_QUEUES` when it is not set.
+/// It must run before `cuInit`. `main` calls it before any thread starts, and
+/// `api` calls it for the tools and tests that reach the driver another way.
+/// It sets the variable once.
+pub fn prepare_environment() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let current = std::env::var_os("CUDA_DEVICE_MAX_CONNECTIONS");
+        if let Some(queues) = queues_to_set(current.as_deref()) {
+            // SAFETY: `std::env::set_var` is unsafe only because another
+            // thread may read the environment through libc while it runs.
+            // The game runs it first in `main`, before any thread exists.
+            // Anywhere else it runs once, as the engine opens.
+            unsafe { std::env::set_var("CUDA_DEVICE_MAX_CONNECTIONS", queues) };
+        }
+    });
+}
+
 /// The CUDA driver and NVRTC compiler, shared by all engines. The first call
 /// loads both and initializes the driver.
 fn api() -> Result<Arc<Api>> {
     API.get_or_init(|| {
+        prepare_environment();
         let cu = Driver::load().map_err(|e| format!("{e:#}"))?;
         cu.check(unsafe { (cu.init)(0) }, "cuInit")
             .map_err(|e| format!("{e:#}"))?;
@@ -2322,6 +2356,14 @@ mod tests {
             2 * kernels <= CACHE_FILES,
             "{kernels} kernels, cache {CACHE_FILES}"
         );
+    }
+
+    /// The engine asks for 32 queues when the environment has no count, and a
+    /// developer's count stays.
+    #[test]
+    fn a_developers_queue_count_stays() {
+        assert_eq!(queues_to_set(None), Some("32"));
+        assert_eq!(queues_to_set(Some(std::ffi::OsStr::new("8"))), None);
     }
 
     /// Eviction deletes the oldest kernels beyond `CACHE_FILES`, and leaves

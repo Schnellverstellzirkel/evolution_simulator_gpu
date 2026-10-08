@@ -113,8 +113,11 @@ enum Action {
     },
 }
 fn main() -> Result<()> {
+    // The CUDA queue setting is an environment variable, and nothing else may
+    // read the environment while it is set, so it comes before any thread.
+    evolution_simulator::cuda_engine::prepare_environment();
     // `threads::init` reads the process's CPUs before any thread is pinned, so
-    // it comes first. The Rayon pool breeds on every CPU but two: the first
+    // it comes next. The Rayon pool breeds on every CPU but two: the first
     // runs the worker thread and the second the GPU engine thread, so commands
     // and frames always find a core during a breeding burst. Pool threads are
     // SCHED_BATCH at nice 10 (`threads`).

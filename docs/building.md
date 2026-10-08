@@ -40,6 +40,9 @@ the rest to the L1 cache).
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
 or the GPU is not an NVIDIA GPU, the game stops with an error that says so.
+Before it starts the driver the engine sets `CUDA_DEVICE_MAX_CONNECTIONS` to 32
+(the most), unless the environment already has it. CUDA's default is 8 queues,
+and kernels on streams that share a queue run one after the other.
 
 The driver library (`libcuda.so.1`) comes with the NVIDIA driver. NVRTC comes
 with a CUDA toolkit, or, without root, from NVIDIA's pip wheel in a virtual
