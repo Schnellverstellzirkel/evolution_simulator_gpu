@@ -42,7 +42,7 @@
 #define INV_H (RATE * SUBSTEPS)
 #define PI_F 3.14159265359f
 #define TAU_F 6.28318530718f
-// Stands for no parent bone and no sensor node in the records.
+// The value in the records for no parent bone and no sensor node.
 #define NONE 0xffffffffu
 // Steps per 1/60 s, the clock of the head shake measure.
 #define HEAD_SAMPLE ((unsigned)(RATE / 60.0f + 0.5f))
@@ -126,7 +126,7 @@ struct Result {
 __device__ __forceinline__ float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
 // `a` plus a whole number of turns, in [-PI_F, PI_F).
 __device__ __forceinline__ float wrapf(float a) { return a - TAU_F * floorf((a + PI_F) * (1.0f / TAU_F)); }
-// The part of `x` above its floor, in [0, 1) also for a negative `x`.
+// The part of `x` above its floor. It is in [0, 1) for a negative `x` too.
 __device__ __forceinline__ float fracf(float x) { return x - floorf(x); }
 
 // Half precision, as the rung trace carries values. `f2h` rounds a float to
@@ -360,10 +360,11 @@ __device__ void joint_push(Body& b, const Joint& k, float lambda) {
 struct MusclePull {
     // The two bones' pivot and tip nodes.
     unsigned a0, a1, b0, b1;
-    // The anchors, as shares of the bones' lengths from their pivots. Then
-    // Hill's factor on the lengthening speed, the force cap (N), one over the
-    // capacity of the energy store (1/J), the stiffness of the tendon (N/m) and
-    // the slack length (m).
+    // `anchor_a` and `anchor_b` are the anchors, as shares of the bones'
+    // lengths from their pivots. `hill` is Hill's factor on the lengthening
+    // speed. `cap` is the force cap (N). `inv_capacity` is one over the
+    // capacity of the energy store (1/J). `tendon_k` is the stiffness of the
+    // tendon (N/m) and `slack` its slack length (m).
     float anchor_a, anchor_b, hill, cap, inv_capacity, tendon_k, slack;
 };
 // The first two lines of the muscle record at `m`.
@@ -599,6 +600,8 @@ __device__ void solve_joints(Body& b) {
 template <int MODE>
 __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 #if GROUND
+    // The ground's normal is (nx, ny), and `dry` is the clearance of the node's
+    // surface above the ground. `depth` is how far the node is inside it.
     const float2 g = ground(pos_at<MODE>(b, i).x, b.amp, b.qphase, p);
     const float secant = sqrtf(1.0f + g.y * g.y);
     const float nx = -g.y / secant, ny = 1.0f / secant;
@@ -639,10 +642,13 @@ __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 // substep, with equal and opposite pushes that keep the body's momentum.
 template <int MODE>
 __device__ void damp_joints(Body& b) {
+    // The share of the turning speed that one substep takes: the substep over
+    // the damping time constant, at most 1.
     const float share = fminf(H * INV_JOINT_DAMPING, 1.0f);
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
         const Joint k = joint<MODE>(b, j, false);
+        // The joint's turning speed: the gradients times the node velocities.
         const float rate = k.g_tip.x * vel_at<MODE>(b, k.tip).x + k.g_tip.y * vel_at<MODE>(b, k.tip).y
                          + k.g_far.x * vel_at<MODE>(b, k.far).x + k.g_far.y * vel_at<MODE>(b, k.far).y
                          + k.g_hub.x * vel_at<MODE>(b, k.hub).x + k.g_hub.y * vel_at<MODE>(b, k.hub).y;
@@ -721,35 +727,55 @@ __device__ void record_frame(float2* __restrict__ frames, unsigned t, Body& b, c
 
 // The behavior totals of a trial, kept between steps.
 struct Tally {
+    // Node bits, node i in bit i: the nodes that have touched the ground, those
+    // of them that later lifted clear of it, and the nodes on the ground after
+    // the last step.
     unsigned contact_bits, lift_bits, ground_bits;
+    // The running average of the head's acceleration (m/s^2).
     float head_shake;
     // The head's position and velocity at the last 60 Hz sample.
     float2 head_at, head_vel;
-    // The rung trace while the trial runs: the distance half a second
-    // before a rung, the speed pair, and the contact and energy pairs.
+    // The rung trace while the trial runs. `rung_x` is the distance half a
+    // second before a rung, as float bits. `rung_speed` holds the speeds at R1
+    // and R2 as two halves. `rung_early` and `rung_late` each hold the share of
+    // nodes that touched the ground and the mean muscle energy store, at R1 and
+    // at R2.
     unsigned rung_x, rung_speed, rung_early, rung_late;
+    // The bits of the end code that the rungs set: the rung that stopped the
+    // trial and the cadence band at each rung.
     unsigned rung_bits;
 };
 
 
 // What a lane keeps of the creature it runs, between steps.
 struct Lane {
+    // Whether the lane has a creature.
     bool live;
+    // The creature's index in the batch, its next step, its flags and the float
+    // offset of its muscle records. The flags are those of `rungs`: 1 audit, 2
+    // exempt, 4 and 8 exempt from R1 and R2, 16 young and 32 reshaped.
     unsigned cidx, step, flags, mus_off;
+    // The rhythm period of the first muscle, rounded to a half. It is the sixth
+    // rung feature.
     float period_f;
+    // The muscles are limp, because the score of a recording is final.
     bool limp;
+    // The result and the totals so far.
     Result mt;
     Tally tl;
 #if RECORD
+    // A recording scores until its score is final. Then `kept` holds the result
+    // and the recording plays on.
     bool scoring;
     Result kept;
 #endif
 };
 
-// Creatures a warp claims from the wave's counter at a time.
+// Creatures a warp claims from the wave's counter at a time. It may not be
+// more than 32, because `advance` tests one creature of a chunk per lane.
 #define CHUNK 32u
 
-// A body with more than NS nodes.
+// Whether creature `cidx` has more than NS nodes, so that it runs in mode 1.
 __device__ __forceinline__ bool is_big(const uint4* __restrict__ heads, unsigned cidx) {
     return (heads[2u * cidx].x & 255u) > NS;
 }
@@ -767,6 +793,11 @@ __device__ __forceinline__ void begin_creature(
 #endif
     ) {
     ln.cidx = cidx;
+    // The two head words of the creature (`kernel::WavePack::heads`). The first
+    // holds the node count, the muscle count, the quake hash and the word
+    // offset of its records. The second holds the float offset of its muscle
+    // records, its total mass, one over it, and the rhythm period of its first
+    // muscle as a half with the creature flags in the high 16 bits.
     const uint4 h0 = heads[2u * cidx];
     const uint4 h1 = heads[2u * cidx + 1u];
     b.nodes = h0.x & 255u;
@@ -779,12 +810,17 @@ __device__ __forceinline__ void begin_creature(
     ln.flags = h1.w >> 16u;
     ln.period_f = h2f(h1.w & 0xffffu);
 #if QUAKE
+    // The quake hash gives the creature its own bumps. Its low 16 bits are the
+    // phase in wave turns, and its high 16 bits scale the height by 0.6 to 1.4
+    // (`physics::quake_phase` and `physics::quake_scale`).
     b.qphase = (float)(h0.z & 0xffffu) * (1.0f / 65536.0f);
     b.amp = p.terrain + p.quake * (0.6f + (float)((h0.z >> 16u) & 0xffffu) * (0.8f / 65536.0f));
 #else
     b.qphase = 0.0f;
     b.amp = p.terrain;
 #endif
+    // A node record is the mass, the radius, the friction coefficient, the
+    // start position and the foot flag. The nodes start at rest.
     b.feet = 0u;
     for (unsigned i = 0u; i < b.nodes; i++) {
         const unsigned* r = rec + i * NODE_WORDS;
@@ -798,6 +834,8 @@ __device__ __forceinline__ void begin_creature(
         vel_at<MODE>(b, i).x = 0.0f; vel_at<MODE>(b, i).y = 0.0f;
         b.normal_force[i] = 0.0f; b.friction_force[i] = 0.0f;
     }
+    // A bone record is the pivot node, the length, the parent bone and the
+    // joint range, low and high. Its sixth word is spare.
     const unsigned* bone_rec = rec + b.nodes * NODE_WORDS;
     for (unsigned j = 0u; j < b.bones; j++) {
         const unsigned* r = bone_rec + j * BONE_WORDS;
@@ -807,6 +845,7 @@ __device__ __forceinline__ void begin_creature(
         b.lo[j] = __uint_as_float(r[3]);
         b.hi[j] = __uint_as_float(r[4]);
     }
+    // Every muscle starts rested, with no offset and no demand.
     for (unsigned k = 0u; k < b.muscles; k++) {
         b.energy[k] = 1.0f; b.offset[k] = 0.0f; b.demand[k] = 0.0f; b.pull[k] = 0.0f;
     }
@@ -815,6 +854,9 @@ __device__ __forceinline__ void begin_creature(
     for (unsigned t = 0u; t <= SETTLE; t++) { record_frame<MODE>(frames, t, b, p); }
     ln.scoring = true;
 #endif
+    // The result starts at 0, except that `vertical_oscillation` and
+    // `gait_frequency` start at 1e20 and -1e20. They hold the lowest and the
+    // highest mean node height, so the first step sets both.
     Result& mt = ln.mt;
     mt.fitness = 0.0f; mt.ground_contact = 0.0f; mt.vertical_oscillation = 1e20f; mt.gait_frequency = -1e20f;
     mt.previous_center_y = 0.0f; mt.vertical_extremum = 0.0f; mt.vertical_trend = 0.0f; mt.gait_turns = 0.0f;
@@ -829,9 +871,10 @@ __device__ __forceinline__ void begin_creature(
     ln.step = 0u;
 }
 
-// One step of the creature on this lane: its muscles' drive, the substeps,
+// One step of the creature on this lane: its muscles' demand, the substeps,
 // and what the step leaves (distance, height, contacts, the rungs). When the
-// trial ends, its result is stored and the lane is free.
+// trial ends, its result is stored and the lane is free. A recording plays on
+// to its last step with limp muscles and stores the result then.
 template <int MODE>
 __device__ __forceinline__ void run_step(
     Body& b, Lane& ln,
@@ -847,6 +890,8 @@ __device__ __forceinline__ void run_step(
     Result& mt = ln.mt;
     Tally& tl = ln.tl;
     const unsigned flags = ln.flags;
+    // The steps that end at 1, 2.5, 5 and 10 s, the rungs R1 to R4. `half_s` is
+    // half a second in steps.
     const unsigned rung1 = (unsigned)(RATE) - 1u, rung2 = (unsigned)(2.5f * RATE) - 1u;
     const unsigned rung3 = (unsigned)(5.0f * RATE) - 1u, rung4 = (unsigned)(10.0f * RATE) - 1u;
     const unsigned half_s = (unsigned)(0.5f * RATE);
@@ -865,7 +910,12 @@ __device__ __forceinline__ void run_step(
     }
 #endif
 
-    // What the step leaves: distance, height, contacts.
+    // What the step leaves. `failed` is a position that is not finite or lies
+    // beyond 1e6 m. `center_y` is the mean node height and `com_x` the distance
+    // of the center of mass, which becomes the fitness. `low` and `high` are
+    // the bottom of the lowest node and the top of the highest. `touching` has
+    // the nodes at most `CONTACT_SLACK` above their resting height on the
+    // ground, and `lifted` the nodes more than `LIFT_CLEARANCE` above it.
     bool failed = false;
     float center_y = 0.0f, com_x = 0.0f, low = 1e20f, high = -1e20f;
     unsigned touching = 0u, lifted = 0u;
@@ -886,6 +936,7 @@ __device__ __forceinline__ void run_step(
     com_x *= b.inv_mass;
     tl.contact_bits |= touching;
     tl.lift_bits |= tl.contact_bits & lifted;
+    // The nodes that touch the ground now and did not after the last step.
     const unsigned down = touching & ~tl.ground_bits;
     tl.ground_bits = touching;
     // Touchdowns restart the rhythm of the muscles that sense them.
@@ -900,7 +951,8 @@ __device__ __forceinline__ void run_step(
     }
     // Head shake: the head's acceleration averaged over about
     // HEAD_SHAKE_WINDOW. The head's velocity is its move over each
-    // 1/60 s, so the measure is the same at every step rate.
+    // 1/60 s, so the measure is the same at every step rate. The average
+    // starts when the trial is HEAD_SHAKE_WINDOW old.
     if ((step + 1u) % HEAD_SAMPLE == 0u) {
         const float2 v = make_float2((pos_at<MODE>(b, 0u).x - tl.head_at.x) * 60.0f, (pos_at<MODE>(b, 0u).y - tl.head_at.y) * 60.0f);
         const float ax = (v.x - tl.head_vel.x) * 60.0f, ay = (v.y - tl.head_vel.y) * 60.0f;
@@ -912,6 +964,8 @@ __device__ __forceinline__ void run_step(
         tl.head_vel = v;
     }
     const bool broken = broken_joints<MODE>(b) != 0ull;
+    // In a recording the scoring below stops when the score is final, and the
+    // frames go on.
 #if RECORD
     if (ln.scoring) {
 #endif
@@ -919,11 +973,16 @@ __device__ __forceinline__ void run_step(
     mt.lift_lo = __uint_as_float(tl.lift_bits);
     mt.ground_lo = __uint_as_float(tl.ground_bits);
     mt.head_shake = tl.head_shake;
+    // A fall: the head is below the other end of the neck, a joint is broken,
+    // the head shakes past HEAD_SHAKE_LIMIT, or the trial failed. The distance
+    // at that moment is the fitness, or -1e20 for a failed trial.
     const bool fell = pos_at<MODE>(b, 0u).y < pos_at<MODE>(b, 1u).y || broken || tl.head_shake > HEAD_SHAKE_LIMIT || failed;
     bool ended = false;
     if (fell) {
         mt.fall_time = t_now + DT;
         mt.fitness = failed ? -1e20f : com_x;
+        // A fall at or before the screen step gives its distance as the
+        // distance at the screen.
         if (step <= p.screen_step) { mt.screen_x = mt.fitness; }
         ended = true;
     }
@@ -931,7 +990,11 @@ __device__ __forceinline__ void run_step(
     mt.height_sum += high - low;
     mt.vertical_oscillation = fminf(mt.vertical_oscillation, center_y);
     mt.gait_frequency = fmaxf(mt.gait_frequency, center_y);
-    // Gait turns: the center's height changes direction.
+    // Gait turns, counted on every SAMPLE-th step. `vertical_trend` is 0 until
+    // the mean node height has moved by more than 0.5 mm between two samples.
+    // Then it is 1 while the height rises and -1 while it falls, and
+    // `vertical_extremum` is the highest or lowest height since the last turn.
+    // A height that turns back from it by more than 5 mm counts one turn.
     if (step == 0u) {
         mt.previous_center_y = center_y;
         mt.vertical_extremum = center_y;
@@ -963,9 +1026,13 @@ __device__ __forceinline__ void run_step(
         }
         mt.previous_center_y = center_y;
     }
-    // The rung trace (creature_kernel::RungTrace): the distance at 1,
-    // 2.5, 5 and 10 s and the early features at 1 and 2.5 s, as fp16
-    // pairs in result words the host reads for nothing else.
+    // The rung trace (`creature_kernel::RungTrace`). At 1 and 2.5 s (R1 and R2)
+    // it takes the distance, the speed over the last half second, the share of
+    // nodes that touched the ground, the head shake and the mean muscle energy
+    // store. At 5 and 10 s (R3 and R4) it takes the distance. Each value is an
+    // fp16, two to a word. Some words wait in result fields that the host reads
+    // for nothing else, and the end of the trial moves the rest there.
+    // Half a second before R1 and R2 the distance is noted for the speed.
     if (step + half_s == rung1 || step + half_s == rung2) { tl.rung_x = __float_as_uint(com_x); }
     if (step == rung1 || step == rung2) {
         const bool second = step == rung2;
@@ -981,14 +1048,20 @@ __device__ __forceinline__ void run_step(
         tl.rung_speed = (tl.rung_speed & keep) | (f2h(speed) << sh);
         const unsigned pair = f2h(touched) | (f2h(en_mean) << 16u);
         if (second) { tl.rung_late = pair; } else { tl.rung_early = pair; }
-        // The cadence band the audit lane files this trial under.
+        // The cadence band: the gait frequency so far in 8 bands of 0.75 Hz
+        // (`RungTrace::BAND_COUNT`), the last one open. The audit lane files
+        // this trial under it.
         const unsigned r = second ? 1u : 0u;
         const float gait_now = mt.gait_turns * (0.5f / (t_now + DT));
         const unsigned band = min((unsigned)(gait_now * (8.0f / 6.0f)), 7u);
         tl.rung_bits |= band << (8u + 3u * r);
-        // Flags: 1 audit, 2 exempt, 4 and 8 exempt from R1 and R2.
+        // The rule does not apply to an audit creature (flag 1), an exempt one
+        // (flag 2) or one that is exempt from this rung (flag 4 for R1, flag 8
+        // for R2). A creature that has already ended is not stopped again.
         if (!ended && (flags & (second ? 0xbu : 0x7u)) == 0u) {
             const RungParams rp = second ? p.r2 : p.r1;
+            // The features, rounded to half precision as the host rounds them
+            // (`rungs::features`).
             const float fv[6] = {h2f(f2h(com_x)), h2f(f2h(speed)), h2f(f2h(touched)),
                                  h2f(f2h(tl.head_shake)), h2f(f2h(en_mean)), ln.period_f};
             float score = 0.0f;
@@ -997,6 +1070,10 @@ __device__ __forceinline__ void run_step(
                 score = fmaf(rp.w[i], fv[i], score);
                 finite = finite && isfinite(fv[i]);
             }
+            // The rule stops the creature when all features are finite, the
+            // score is below the bias and its band is on. The creature keeps
+            // its distance, and `rung_bits` notes the rung, 1 for R1 and 2 for
+            // R2.
             if (finite && score < rp.bias && ((rp.off >> band) & 1u) == 0u) {
                 mt.screened = t_now + DT;
                 mt.screen_x = com_x;
@@ -1006,12 +1083,16 @@ __device__ __forceinline__ void run_step(
             }
         }
     }
+    // R3 and R4 note the distance and stop nothing.
     if (step == rung3 || step == rung4) {
         const bool second = step == rung4;
         const unsigned keep = second ? 0x0000ffffu : 0xffff0000u;
         mt.lift_hi = __uint_as_float((__float_as_uint(mt.lift_hi) & keep) | (f2h(com_x) << (second ? 16u : 0u)));
     }
-    // The early screen: below the bar at the screen time, the trial stops.
+    // The early screen (`physics::Screen`): below the bar at the screen step,
+    // the trial stops. The bar is `p.screen_bar_reshaped` for flag 32,
+    // `p.screen_bar_young` for flag 16 and `p.screen_bar` for the rest. An
+    // audit creature is never stopped.
     if (step == p.screen_step && !ended) {
         mt.screen_x = com_x;
         const float bar = (flags & 32u) != 0u ? p.screen_bar_reshaped
@@ -1022,6 +1103,9 @@ __device__ __forceinline__ void run_step(
             ended = true;
         }
     }
+    // The trial ends at a stop, at a fall or at its last step. Then
+    // `vertical_oscillation` becomes the range of the mean node height and
+    // `gait_frequency` half the turns per second.
     bool last = false;
     if (ended) {
         mt.vertical_oscillation = fmaxf(mt.gait_frequency - mt.vertical_oscillation, 0.0f);
@@ -1043,8 +1127,14 @@ __device__ __forceinline__ void run_step(
         if (step < rung3) { d = (d & 0xffff0000u) | fin; }
         if (step < rung4) { d = (d & 0x0000ffffu) | (fin << 16u); }
         mt.lift_hi = __uint_as_float(d);
+        // The end code (`RungTrace::code`): bits 0 and 1 for a stop by the
+        // screen or a rung, bit 4 for a fall, bit 5 for a failed trial, bits 6
+        // to 13 from `rung_bits` and bit 14 for an audit creature.
         const unsigned code = (fell ? 16u : 0u) | (failed ? 32u : 0u) | (mt.screened > 0.0f ? 3u : 0u)
             | (tl.rung_bits & 0x3fc0u) | ((flags & 1u) << 14u);
+        // The gait counters are finished, so their words carry the rest of the
+        // trace now: the speeds, the features at R1 and at R2, and the head
+        // shakes. `ground_hi` takes the end code and the steps run.
         mt.previous_center_y = __uint_as_float(tl.rung_speed);
         mt.vertical_extremum = __uint_as_float(tl.rung_early);
         mt.vertical_trend = __uint_as_float(tl.rung_late);
@@ -1064,6 +1154,8 @@ __device__ __forceinline__ void run_step(
     }
 #if RECORD
     }
+    // The frame after this step comes after the SETTLE + 1 frames of the start
+    // pose. The recording ends at the last step and stores the result it kept.
     record_frame<MODE>(frames, SETTLE + step + 1u, b, p);
     if (step + 1u >= p.steps) {
         results[ln.cidx] = ln.kept;
@@ -1080,6 +1172,16 @@ __device__ __forceinline__ void run_step(
 // their muscles and then their nodes, so a claim holds alike bodies. A warp
 // runs bodies of one class at a time: mode 0 for those of at most NS nodes
 // and mode 1, with half its lanes, for the others.
+//
+// The arguments are those of the host's launch (`cuda_engine`). `records`,
+// `muscles` and `heads` hold the node and bone records, the muscle records and
+// the two head words of the batch (`kernel::WavePack`). `unused` is a word
+// that the kernel does not read. `results` has one `Result` for each creature
+// of the batch. The wave is the `p.count` creatures from creature `p.base`,
+// and `counter` counts from 0 the creatures that the warps have claimed. A
+// recording kernel (RECORD) also gets `frames`, where it writes every frame of
+// its one creature. The launch bounds ask the compiler to fit `MIN_BLOCKS`
+// blocks of `BLOCK` threads on a multiprocessor.
 extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned* __restrict__ records,
     const float* __restrict__ muscles,
@@ -1092,6 +1194,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     , float2* __restrict__ frames
 #endif
     ) {
+    // All 32 lanes of a warp, for the warp votes. `lane` is this thread's place
+    // in its warp, and `below` is the mask of the lanes before it.
     const unsigned FULL = 0xffffffffu;
     const unsigned lane = threadIdx.x & 31u;
     const unsigned below = (1u << lane) - 1u;
@@ -1106,13 +1210,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     int mode = 0;
     for (;;) {
         __syncwarp();
-        // Free lanes take creatures from the window.
+        // Free lanes take creatures from the window. In mode 0 all 32 lanes are
+        // usable. In mode 1 only the first 16 are, because a creature there
+        // also uses the columns of the other 16 lanes, for its odd nodes.
         unsigned usable = mode == 0 ? FULL : 0xffffu;
         unsigned need = ~__ballot_sync(FULL, ln.live) & usable;
         unsigned fresh = 0u;
         unsigned mine_at = 0u;
         while (need != 0u) {
             if (win_cur < win_end) {
+                // The free lanes, in lane order, take the next creatures of
+                // the window.
                 const unsigned rank = (unsigned)__popc(need & below);
                 const unsigned take = min(win_end - win_cur, (unsigned)__popc(need));
                 const bool mine = ((need >> lane) & 1u) != 0u && rank < take;
@@ -1124,6 +1232,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 continue;
             }
             if (chunk_cur >= chunk_end) {
+                // The chunk is used up. Lane 0 claims the next CHUNK creatures
+                // of the wave, and the claims end when the counter is past it.
                 if (claimed_all) { break; }
                 unsigned c0 = 0u;
                 if (lane == 0u) { c0 = atomicAdd(counter, CHUNK); }
@@ -1149,6 +1259,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             win_end = run_end;
             chunk_cur = run_end;
         }
+        // A lane that got a creature starts it.
         if (((fresh >> lane) & 1u) != 0u) {
             ln.live = true;
             if (mode == 0) {
@@ -1165,7 +1276,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     );
             }
         }
+        // No lane has a creature and none is left to claim: the warp is done.
         if (__ballot_sync(FULL, ln.live) == 0u) { break; }
+        // Every live lane runs one step.
         if (ln.live) {
             if (mode == 0) {
                 run_step<0>(b, ln, muscles, results, p
