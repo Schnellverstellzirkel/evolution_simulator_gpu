@@ -388,9 +388,11 @@ pub struct Completed {
 }
 
 /// Submission slots per GPU for standard units. One more unit packs on the
-/// engine thread while every slot runs.
+/// engine thread while every slot runs. The 100 wild islands make about 800
+/// small units a generation, and the slots set how many of them run at once.
+/// That needs the CUDA queues of `cuda_engine::prepare_environment`.
 pub fn gpu_slots() -> u32 {
-    4
+    24
 }
 
 /// Confirmation units on the engine thread at most: one on the GPU's slot for
