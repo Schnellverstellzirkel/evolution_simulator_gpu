@@ -17,8 +17,12 @@ use crate::evolution::{
 };
 use crate::qd::gaussian;
 
-/// Narrows one joint's range and widens a neighbouring joint's range by the
-/// same angle (within `JOINT_LIMIT`): flexibility moves along the limb.
+/// Moves joint range from one joint to a neighbour: a bone and the bone above
+/// it or a bone below it, neither of them the neck. The first joint narrows
+/// and the second widens by the same angle, so the two ranges keep their total
+/// width. The angle is 20 to 80% of the most that can move, which is the
+/// smaller of the narrowed joint's width and the widened joint's room up to
+/// `JOINT_LIMIT`. It returns false when no pair has more than 0.01 rad to move.
 pub(crate) fn redistribute_joint_flex(
     c: &mut Creature,
     _cfg: &Config,
@@ -59,9 +63,16 @@ pub(crate) fn redistribute_joint_flex(
     true
 }
 
-/// Finds two branches of the same shape (same bone count, similar lengths)
-/// and applies one random change to both: bone lengths, joint ranges or
-/// anchors. Their timing difference stays.
+/// Picks a pair of matching limbs (`matching_limbs`) and one position along
+/// them. Then it makes one random change to the two bones at that position,
+/// the same change to both. The change is one of three, with equal odds. It
+/// scales both lengths by `exp(0.15 * g)`. Or it moves both joint ranges, the
+/// lower limit by `0.15 * g` and the upper limit by another `0.15 * g`. Or it
+/// moves every muscle end on either bone along the bone by `0.1 * g`. Each
+/// `g` is a new gaussian draw, and lengths, ranges and anchors stay within
+/// their limits. Muscle timing is untouched, so the pair keeps its timing
+/// difference. It returns false when there is no pair, or when the limits
+/// leave both bones as they were.
 pub(crate) fn mutate_matching_limbs(
     c: &mut Creature,
     _cfg: &Config,
@@ -185,7 +196,9 @@ pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
 
 /// Along a chain of bones (a path down one branch), sets the phase of the
 /// muscles on successive bones to grow by one step per bone: a contraction
-/// wave, for curling and crawling.
+/// wave, for curling and crawling. The step is 0.05 to 0.25 of a cycle, with
+/// equal odds of a positive or a negative sign. It returns false when the body
+/// has no chain, or when no muscle is on the chain.
 pub(crate) fn chain_phase_wave(
     c: &mut Creature,
     _cfg: &Config,
@@ -236,9 +249,14 @@ fn phase_wave(c: &mut Creature, chain: &[usize], step: f32) -> bool {
     true
 }
 
-/// Shifts whole limbs (the branches at one junction, or every leaf branch) to
-/// a pattern of phase offsets: all together, alternating halves, or evenly
-/// staggered, keeping the timing inside each limb.
+/// Shifts whole limbs to a pattern of phase offsets: all together, every
+/// second limb half a cycle later, or limb `i` of `n` a share `i / n` of a
+/// cycle later (evenly staggered). The three patterns have equal odds. The
+/// limbs are the branches at one junction (a node with two or more bones below
+/// it) or every leaf limb, with equal odds. Each limb's muscles move by one
+/// amount, so the timing inside a limb stays. It returns false when the
+/// junction pick finds no junction, when there are fewer than two limbs, or
+/// when no muscle is on them.
 pub(crate) fn limb_phase_pattern(
     c: &mut Creature,
     _cfg: &Config,
@@ -376,8 +394,11 @@ pub(super) fn muscle_groups(c: &Creature, parts: &[BoneIds]) -> Bounded<MuscleId
 }
 
 /// Changes the duty of every muscle in a limb by one amount and moves their
-/// phases so each contraction keeps its middle: a slower push with a quicker
-/// return, or the reverse.
+/// phases so each contraction keeps its middle: a slower contraction with a
+/// quicker release, or the reverse. The limb is the branch below a random bone
+/// other than the neck, and a muscle counts if either of its ends is on it.
+/// The amount is 0.03 to 0.2 of a cycle, up or down with equal odds, and each
+/// duty stays within 0.05 and 0.95. It returns false when no duty changes.
 pub(crate) fn limb_duty_cycle(
     c: &mut Creature,
     _cfg: &Config,
@@ -403,9 +424,13 @@ pub(crate) fn limb_duty_cycle(
     changed
 }
 
-/// Picks a foot (a leaf node) and makes every muscle on a bone at that foot
-/// sense it, with reset phases that keep their current order, so landing
-/// restarts the limb's movement as a whole.
+/// Picks a foot (a node other than the head with one bone) that has a muscle
+/// on its bone. Every muscle on that bone then senses the foot's touchdown, in
+/// place of any sensor it had. The first muscle resets to a random phase, and
+/// each other muscle resets to that phase plus its own phase gap to the first.
+/// So a landing restarts the limb's movement as a whole, with the muscles in
+/// the same order and spacing as before. It returns false when no foot has a
+/// muscle on its bone.
 pub(crate) fn touchdown_package(
     c: &mut Creature,
     _cfg: &Config,
@@ -440,8 +465,13 @@ pub(crate) fn touchdown_package(
     true
 }
 
-/// Moves part of one organ's mass to another bone (creating an organ there
-/// if needed), keeping the total organ mass and the organ limits.
+/// Moves part of one organ's mass to another bone, so the total organ mass
+/// stays the same. The source keeps at least `MIN_ORGAN_MASS`. The target is
+/// either a bone with an organ, which stays within `MAX_ORGAN_MASS`, or a bone
+/// with no organ that has a stretch within `ORGAN_RADIUS` of the organ center.
+/// That bone gets a new organ of at least `MIN_ORGAN_MASS` at a random place
+/// in the stretch. It returns false when the body has no organ, or when no
+/// other bone can take mass.
 pub(crate) fn redistribute_organ_mass(
     c: &mut Creature,
     _cfg: &Config,
