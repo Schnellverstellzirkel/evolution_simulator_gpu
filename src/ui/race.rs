@@ -112,16 +112,16 @@ impl App {
         self.race_pending = false;
         self.race_camera = 0.0;
     }
-    /// Empties the race and marks it as waiting for creatures. With no picks
-    /// it asks for the ranked archive, so the top five can run again. With
-    /// picks, `maybe_build_race` builds the lanes from them.
+    /// Empties the race and marks it as waiting for creatures. It asks the
+    /// worker for the ranked archive. A paused game publishes a snapshot only
+    /// when something changes, and the request is a change. With no picks, the
+    /// list builds the top five (`build_top_race`). With picks,
+    /// `maybe_build_race` builds the lanes from them when the snapshot arrives.
     pub(super) fn restart_race(&mut self) {
         self.race.clear();
         self.race_pending = true;
         self.race_camera = 0.0;
-        if self.race_picks.is_empty() {
-            self.request_cards();
-        }
+        self.request_cards();
     }
     /// The Race tab: the title row and the controls, then the lanes on the left
     /// and the standings board on the right. The lanes share one zoom and one
