@@ -1,16 +1,15 @@
-//! Gait operators: symmetry and repetition: pairs, mirrored halves, repeated segments.
-//!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
+//! Gait operators for symmetry and repetition: legs in pairs, mirrored body
+//! halves, repeated trunk segments and legs that run one shared muscle program.
+//! The operators of this file share one pick slot (`GAIT_FILES` in `mod.rs`)
+//! and are compound, so each is a whole change to the body and its child gets
+//! no parameter noise.
 //!
 //! The sources are Sims (1994, symmetric limb pairs with mirrored timing),
-//! Lipson and Pollack (2000, legs as repeated rigid bars), Cheney et al.
-//! (2013, regular and symmetric bodies travel further), Hornby and Pollack
-//! (2001, repeated parts) and the central pattern generator view of gait
-//! (one oscillator program run by every segment, each shifted in phase: a
-//! walk is alternation, a metachronal wave is a constant lag per segment).
-//! Animals repeat one leg design along the body and run it under a shared
-//! program, so these operators move a body toward that form in one step.
+//! Lipson and Pollack (2000, legs as repeated rigid bars), Cheney et al. (2013,
+//! regular and symmetric bodies travel further) and Hornby and Pollack (2001,
+//! repeated parts). The central pattern generator view of gait adds that every
+//! segment runs one oscillator program shifted in phase, so a walk is
+//! alternation and a metachronal wave is a constant lag per segment.
 use super::compound::{close_ring, limb_phase, scale_bones, shed_tips};
 use super::extra::{drive, limb_drive};
 use super::junctions::{add, add_node, keep_strokes, pos, shift_branch, spans, sub};
@@ -24,7 +23,8 @@ use super::{
 use crate::config::Config;
 use crate::evolution::{Bone, Bounded, Creature, MAX_NODES, Muscle, Rng, max_bone_length};
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name. The structural emitter takes one of them by
+/// its position here, so the order is part of the search. Add each new one here.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("clone_best_leg", clone_best_leg),
     ("mirror_body_halves", mirror_body_halves),
@@ -41,27 +41,33 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("copy_foot_to_all_legs", copy_foot_to_all_legs),
 ];
 
-// Helpers.
+// Helpers. A leg is a leaf limb (`leaf_limbs` in `rhythm.rs`): the bones from a
+// tip up to the node where the body branches, or up to the neck.
 
 /// How far a leg's tip lies in front of its hip (negative: behind).
 fn reach_x(c: &Creature, limb: &[usize]) -> f32 {
     tip_x(c, limb) - c.nodes[hip(c, limb)].x
 }
 
-/// Whether two legs point to opposite sides, so one is the other's mirror image.
+/// Whether two legs reach in opposite directions from their hips, one forwards
+/// and one backwards, so a copy of one onto the other must be reflected.
 fn opposed(c: &Creature, x: &[usize], y: &[usize]) -> bool {
     reach_x(c, x) * reach_x(c, y) < -1.0e-4
 }
 
-/// The index in `legs` of the leg with the most drive, if it has any.
+/// The index in `legs` of the leg with the most drive (`limb_drive`), or `None`
+/// when there are no legs or the best one has no drive. A tie goes to the last
+/// of the tied legs.
 fn best_leg(c: &Creature, legs: &[BoneIds]) -> Option<usize> {
     let best = (0..legs.len())
         .max_by(|&x, &y| limb_drive(c, &legs[x]).total_cmp(&limb_drive(c, &legs[y])))?;
     (limb_drive(c, &legs[best]) > 0.0).then_some(best)
 }
 
-/// Whether leg `y` already is leg `x` (or its mirror image with `mirror`):
-/// same node offsets from the hip and the same joint ranges.
+/// Whether leg `y` already has the shape of leg `x`, reflected when `mirror` is
+/// set. Matching nodes must lie within 0.03 in x and in y of the same offset
+/// from their hips, and matching joint ranges must agree within 0.05 rad. Legs
+/// with different bone counts never match.
 fn same_pose(c: &Creature, x: &[usize], y: &[usize], mirror: bool) -> bool {
     if x.len() != y.len() {
         return false;
@@ -90,16 +96,23 @@ fn same_pose(c: &Creature, x: &[usize], y: &[usize], mirror: bool) -> bool {
 /// One leg to replace by a copy of another.
 #[derive(Clone, Copy)]
 struct Job {
+    /// The first bone of the leg to copy.
     source: usize,
+    /// The first bone of the leg that the copy replaces.
     target: usize,
+    /// Whether the copy is reflected.
     mirror: bool,
+    /// How much later the copy's muscles run, in cycles.
     phase: f32,
 }
 
-/// Replaces each job's target leg by a copy of its source leg at the
-/// target's hip (reflected with `mirror`, muscles `phase` of a cycle later),
-/// then closes the ring. Jobs the body has no room for are dropped from the
-/// end. Returns whether the creature changed.
+/// Replaces the target leg of each job by a copy of its source leg, hung from
+/// the target's hip (reflected with `mirror`, muscles `phase` of a cycle later),
+/// then closes the motor ring. The copies are added before the old legs go. A
+/// job the body has no room for ends the list, so it and the jobs after it are
+/// dropped. The body stays as it was if no job fits, if it would grow by more
+/// than two nodes, or if the ring does not close. Returns whether the creature
+/// changed.
 fn replant(c: &mut Creature, cfg: &Config, jobs: &[Job], rng: &mut Rng) -> bool {
     let mut next = c.clone();
     let mut gone_bones = BoneIds::new();
@@ -147,7 +160,8 @@ fn replant(c: &mut Creature, cfg: &Config, jobs: &[Job], rng: &mut Rng) -> bool 
     true
 }
 
-/// The x middle, span, and left boundary of the body's nodes.
+/// The x middle of the body's nodes, their x span (at least 0.2) and their
+/// lowest x.
 fn extent(c: &Creature) -> (f32, f32, f32) {
     let (lo, hi) = c.nodes.iter().fold((f32::MAX, f32::MIN), |(lo, hi), n| {
         (lo.min(n.x), hi.max(n.x))
