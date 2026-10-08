@@ -39,18 +39,21 @@ fn main() -> Result<()> {
     let experiment = storage::load_any_version(path)?;
     let islands = storage::island_count();
     // The global archive first, then the archives of the island list in their
-    // order, each with a name.
+    // order, each with a name. The list holds the islands, then the nursery of
+    // new random bodies of each island, then the nursery of reshaped bodies of
+    // each island. A nursery is named by the number of its island.
     let archives = std::iter::once(("global".to_owned(), &experiment.archive)).chain(
         experiment.islands.iter().enumerate().map(|(k, island)| {
-            // TODO: a wild island gets the wrong name, because `k - islands`
-            // underflows for it. A nursery of reshaped bodies reads `nursery`
-            // with a number past the last island.
             let name = if k < storage::ISOLATED_ISLANDS {
                 format!("island {k}")
             } else if k == storage::hub_island() {
                 "hub".to_owned()
-            } else {
+            } else if k < islands {
+                format!("wild island {k}")
+            } else if k < 2 * islands {
                 format!("nursery {}", k - islands)
+            } else {
+                format!("reshaped {}", k - 2 * islands)
             };
             (name, island)
         }),
