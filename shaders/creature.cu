@@ -19,16 +19,16 @@
 // back sliding, so no step adds energy. The muscles are the only source of
 // work. Every node is its own contact, with no limit on their number.
 //
-// Where the state lives. A body of at most NS nodes keeps its node positions,
-// velocities and muscle forces in shared memory, one column per thread. A
-// thread reads them by the node numbers of its bones, joints and muscles, and
-// a warp reads a row of shared memory without bank conflicts whatever those
-// numbers are. In the thread's own memory the same reads cost a cache line
-// per lane, and the lines of all resident warps do not fit in the L1 cache.
-// The constants of a body and the energy of its muscles stay in the thread's
-// own memory, where a warp reads them by one index. A larger body keeps its
-// node state in the thread's own memory too. A warp runs bodies of one of the
-// two classes at a time (see `advance`).
+// Where the state lives. The node positions, velocities and muscle forces of
+// a body are in shared memory, one column per thread (two for a body of more
+// than NS nodes, see `s_pos`). A thread reads them by the node numbers of its
+// bones, joints and muscles, and a warp reads a row of shared memory without
+// bank conflicts whatever those numbers are. In the thread's own memory the
+// same reads cost a cache line per lane, and the lines of all resident warps
+// do not fit in the L1 cache. The constants of a body and the energy of its
+// muscles stay in the thread's own memory, where a warp reads them by one
+// index. A warp runs bodies of one of the two classes at a time (see
+// `advance`).
 //
 // Defines: RATE (steps per second), SUBSTEPS, SETTLE, SAMPLE, MAXN, MAXM,
 // BLOCK, MIN_BLOCKS, RECORD, the world flags (GROUND, TERRAIN, SLOPE, GAPS,
@@ -199,11 +199,16 @@ __device__ float ice_at(float x) {
     return s * s * (3.0f - 2.0f * s);
 }
 
-// Bodies of at most NS nodes keep their moving state in shared memory
-// (FAST), one column per thread, so that a warp reads one row of a table
-// without bank conflicts whatever nodes its lanes ask for. Larger bodies keep
-// it in the thread's own memory. Node i of a thread is at i * BLOCK + the
-// thread's index. Each table holds a pair per node.
+// The moving state of the nodes is in shared memory: three tables with a pair
+// per node (position, velocity, and the force of the muscles, which the node
+// loop then replaces with the position at the start of the substep), NS rows
+// by one column per thread. A warp reads a row without bank conflicts
+// whatever nodes its lanes ask for.
+//   MODE 0, bodies of at most NS nodes: node i is in row i of the thread's
+//     column. All 32 lanes of a warp run.
+//   MODE 1, bodies of up to 2 * NS nodes: node i is in row i / 2, in the
+//     thread's column when i is even and in the column 16 to its right when i
+//     is odd. Only the first 16 lanes of a warp run.
 #define NS 16u
 __shared__ float2 s_pos[NS * BLOCK];
 __shared__ float2 s_vel[NS * BLOCK];
@@ -216,11 +221,6 @@ struct Body {
     // Nodes.
     float mass[MAXN], inv_m[MAXN], radius[MAXN], fric[MAXN];
     unsigned feet;
-    // Position, velocity and a pair that the muscles' forces of the substep
-    // fill and the node loop then replaces with the position at the start
-    // of the substep. These tables are used by bodies too large for shared
-    // memory (not FAST).
-    float2 pos_l[MAXN], vel_l[MAXN], fp_l[MAXN];
     // Bones: bone j joins node pivot[j] to node j + 1.
     unsigned char pivot[MAXN], parent[MAXN];
     float length[MAXN], lo[MAXN], hi[MAXN];
@@ -231,19 +231,19 @@ struct Body {
     float normal_force[MAXN], friction_force[MAXN];
 };
 
+// Where node i of this thread is in a table.
+template <int MODE>
+__device__ __forceinline__ unsigned node_slot(unsigned i) {
+    if constexpr (MODE == 0) { return i * BLOCK + threadIdx.x; }
+    else { return (i >> 1) * BLOCK + threadIdx.x + ((i & 1u) << 4); }
+}
 // Node i's position, velocity, and force-then-previous-position pair.
-template <bool FAST>
-__device__ __forceinline__ float2& pos_at(Body& b, unsigned i) {
-    if constexpr (FAST) { return s_pos[i * BLOCK + threadIdx.x]; } else { return b.pos_l[i]; }
-}
-template <bool FAST>
-__device__ __forceinline__ float2& vel_at(Body& b, unsigned i) {
-    if constexpr (FAST) { return s_vel[i * BLOCK + threadIdx.x]; } else { return b.vel_l[i]; }
-}
-template <bool FAST>
-__device__ __forceinline__ float2& fp_at(Body& b, unsigned i) {
-    if constexpr (FAST) { return s_fp[i * BLOCK + threadIdx.x]; } else { return b.fp_l[i]; }
-}
+template <int MODE>
+__device__ __forceinline__ float2& pos_at(Body&, unsigned i) { return s_pos[node_slot<MODE>(i)]; }
+template <int MODE>
+__device__ __forceinline__ float2& vel_at(Body&, unsigned i) { return s_vel[node_slot<MODE>(i)]; }
+template <int MODE>
+__device__ __forceinline__ float2& fp_at(Body&, unsigned i) { return s_fp[node_slot<MODE>(i)]; }
 
 // Joint j: the relative angle of bone j to its parent bone, near the middle
 // of its range, and its gradient. A joint moves three nodes: the tip of
@@ -255,7 +255,7 @@ struct Joint {
     float2 g_tip, g_far, g_hub;
     float angle;
 };
-template <bool FAST>
+template <int MODE>
 __device__ Joint joint(Body& b, unsigned j, bool with_angle = true) {
     Joint k;
     const unsigned pj = b.parent[j];
@@ -265,8 +265,8 @@ __device__ Joint joint(Body& b, unsigned j, bool with_angle = true) {
     const bool at_head = k.hub == b.pivot[pj];
     k.far = at_head ? pj + 1u : b.pivot[pj];
     // u is the parent bone, v this bone, each from its pivot to its tip.
-    const float2 u = make_float2(pos_at<FAST>(b, pj + 1u).x - pos_at<FAST>(b, b.pivot[pj]).x, pos_at<FAST>(b, pj + 1u).y - pos_at<FAST>(b, b.pivot[pj]).y);
-    const float2 v = make_float2(pos_at<FAST>(b, k.tip).x - pos_at<FAST>(b, k.hub).x, pos_at<FAST>(b, k.tip).y - pos_at<FAST>(b, k.hub).y);
+    const float2 u = make_float2(pos_at<MODE>(b, pj + 1u).x - pos_at<MODE>(b, b.pivot[pj]).x, pos_at<MODE>(b, pj + 1u).y - pos_at<MODE>(b, b.pivot[pj]).y);
+    const float2 v = make_float2(pos_at<MODE>(b, k.tip).x - pos_at<MODE>(b, k.hub).x, pos_at<MODE>(b, k.tip).y - pos_at<MODE>(b, k.hub).y);
     const float uu = fmaxf(u.x * u.x + u.y * u.y, 1e-12f), vv = fmaxf(v.x * v.x + v.y * v.y, 1e-12f);
     // The angle from u to v, one atan2 of their cross and dot products.
     k.angle = 0.0f;
@@ -295,11 +295,11 @@ __device__ float joint_weight(const Body& b, const Joint& k) {
 
 // Adds `lambda` times each node's inverse mass times its gradient to the
 // positions or, with VEL, the velocities.
-template <bool FAST, bool VEL>
+template <int MODE, bool VEL>
 __device__ void joint_push(Body& b, const Joint& k, float lambda) {
-    float2& tip = VEL ? vel_at<FAST>(b, k.tip) : pos_at<FAST>(b, k.tip);
-    float2& far = VEL ? vel_at<FAST>(b, k.far) : pos_at<FAST>(b, k.far);
-    float2& hub = VEL ? vel_at<FAST>(b, k.hub) : pos_at<FAST>(b, k.hub);
+    float2& tip = VEL ? vel_at<MODE>(b, k.tip) : pos_at<MODE>(b, k.tip);
+    float2& far = VEL ? vel_at<MODE>(b, k.far) : pos_at<MODE>(b, k.far);
+    float2& hub = VEL ? vel_at<MODE>(b, k.hub) : pos_at<MODE>(b, k.hub);
     tip.x += b.inv_m[k.tip] * lambda * k.g_tip.x;
     tip.y += b.inv_m[k.tip] * lambda * k.g_tip.y;
     far.x += b.inv_m[k.far] * lambda * k.g_far.x;
@@ -367,21 +367,21 @@ __device__ void muscle_demands(Body& b, const float* __restrict__ muscles, float
 }
 
 // Sets the muscles' forces for one substep.
-template <bool FAST>
+template <int MODE>
 __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const Params& p) {
-    for (unsigned i = 0u; i < b.nodes; i++) { fp_at<FAST>(b, i) = make_float2(0.0f, 0.0f); }
+    for (unsigned i = 0u; i < b.nodes; i++) { fp_at<MODE>(b, i) = make_float2(0.0f, 0.0f); }
     for (unsigned k = 0u; k < b.muscles; k++) {
         const MusclePull u = load_pull(muscles + k * MUSCLE_WORDS);
         // The anchors: a share of each bone's length from its pivot.
         const unsigned a0 = u.a0, a1 = u.a1, b0 = u.b0, b1 = u.b1;
-        const float ax = pos_at<FAST>(b, a0).x + (pos_at<FAST>(b, a1).x - pos_at<FAST>(b, a0).x) * u.anchor_a;
-        const float ay = pos_at<FAST>(b, a0).y + (pos_at<FAST>(b, a1).y - pos_at<FAST>(b, a0).y) * u.anchor_a;
-        const float avx = vel_at<FAST>(b, a0).x + (vel_at<FAST>(b, a1).x - vel_at<FAST>(b, a0).x) * u.anchor_a;
-        const float avy = vel_at<FAST>(b, a0).y + (vel_at<FAST>(b, a1).y - vel_at<FAST>(b, a0).y) * u.anchor_a;
-        const float bx = pos_at<FAST>(b, b0).x + (pos_at<FAST>(b, b1).x - pos_at<FAST>(b, b0).x) * u.anchor_b;
-        const float by = pos_at<FAST>(b, b0).y + (pos_at<FAST>(b, b1).y - pos_at<FAST>(b, b0).y) * u.anchor_b;
-        const float bvx = vel_at<FAST>(b, b0).x + (vel_at<FAST>(b, b1).x - vel_at<FAST>(b, b0).x) * u.anchor_b;
-        const float bvy = vel_at<FAST>(b, b0).y + (vel_at<FAST>(b, b1).y - vel_at<FAST>(b, b0).y) * u.anchor_b;
+        const float ax = pos_at<MODE>(b, a0).x + (pos_at<MODE>(b, a1).x - pos_at<MODE>(b, a0).x) * u.anchor_a;
+        const float ay = pos_at<MODE>(b, a0).y + (pos_at<MODE>(b, a1).y - pos_at<MODE>(b, a0).y) * u.anchor_a;
+        const float avx = vel_at<MODE>(b, a0).x + (vel_at<MODE>(b, a1).x - vel_at<MODE>(b, a0).x) * u.anchor_a;
+        const float avy = vel_at<MODE>(b, a0).y + (vel_at<MODE>(b, a1).y - vel_at<MODE>(b, a0).y) * u.anchor_a;
+        const float bx = pos_at<MODE>(b, b0).x + (pos_at<MODE>(b, b1).x - pos_at<MODE>(b, b0).x) * u.anchor_b;
+        const float by = pos_at<MODE>(b, b0).y + (pos_at<MODE>(b, b1).y - pos_at<MODE>(b, b0).y) * u.anchor_b;
+        const float bvx = vel_at<MODE>(b, b0).x + (vel_at<MODE>(b, b1).x - vel_at<MODE>(b, b0).x) * u.anchor_b;
+        const float bvy = vel_at<MODE>(b, b0).y + (vel_at<MODE>(b, b1).y - vel_at<MODE>(b, b0).y) * u.anchor_b;
         const float dx = bx - ax, dy = by - ay;
         const float len = fmaxf(sqrtf(dx * dx + dy * dy), 1e-6f);
         const float ex = dx / len, ey = dy / len;
@@ -404,19 +404,19 @@ __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const 
         b.pull[k] = pull;
 #endif
         const float fx = ex * pull, fy = ey * pull;
-        fp_at<FAST>(b, a0).x += fx * (1.0f - u.anchor_a);
-        fp_at<FAST>(b, a0).y += fy * (1.0f - u.anchor_a);
-        fp_at<FAST>(b, a1).x += fx * u.anchor_a;
-        fp_at<FAST>(b, a1).y += fy * u.anchor_a;
-        fp_at<FAST>(b, b0).x -= fx * (1.0f - u.anchor_b);
-        fp_at<FAST>(b, b0).y -= fy * (1.0f - u.anchor_b);
-        fp_at<FAST>(b, b1).x -= fx * u.anchor_b;
-        fp_at<FAST>(b, b1).y -= fy * u.anchor_b;
+        fp_at<MODE>(b, a0).x += fx * (1.0f - u.anchor_a);
+        fp_at<MODE>(b, a0).y += fy * (1.0f - u.anchor_a);
+        fp_at<MODE>(b, a1).x += fx * u.anchor_a;
+        fp_at<MODE>(b, a1).y += fy * u.anchor_a;
+        fp_at<MODE>(b, b0).x -= fx * (1.0f - u.anchor_b);
+        fp_at<MODE>(b, b0).y -= fy * (1.0f - u.anchor_b);
+        fp_at<MODE>(b, b1).x -= fx * u.anchor_b;
+        fp_at<MODE>(b, b1).y -= fy * u.anchor_b;
     }
 }
 
 // The world's force on node i: gravity, wind, mud, brambles and buoyancy.
-template <bool FAST>
+template <int MODE>
 __device__ float2 node_force(Body& b, unsigned i, const Params& p) {
     const float m = b.mass[i];
     float fx = 0.0f, fy = -p.gravity * m;
@@ -424,22 +424,22 @@ __device__ float2 node_force(Body& b, unsigned i, const Params& p) {
     fx += p.wind * m;
 #endif
 #if MUD || BRAMBLES
-    const float2 g = ground(pos_at<FAST>(b, i).x, b.amp, b.qphase, p);
-    const float dry = (pos_at<FAST>(b, i).y - g.x) / sqrtf(1.0f + g.y * g.y) - b.radius[i];
+    const float2 g = ground(pos_at<MODE>(b, i).x, b.amp, b.qphase, p);
+    const float dry = (pos_at<MODE>(b, i).y - g.x) / sqrtf(1.0f + g.y * g.y) - b.radius[i];
 #endif
 #if MUD
-    fx -= m * MUD_DRAG * (clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH)) * vel_at<FAST>(b, i).x;
+    fx -= m * MUD_DRAG * (clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH)) * vel_at<MODE>(b, i).x;
 #endif
 #if BRAMBLES
     // Brambles hold back every node but the feet while it touches the
     // ground: a drag against its velocity.
     if (((b.feet >> i) & 1u) == 0u && dry < BRAMBLE_REACH) {
-        fx -= m * p.brambles * vel_at<FAST>(b, i).x;
+        fx -= m * p.brambles * vel_at<MODE>(b, i).x;
     }
 #endif
 #if WATER
     {
-        const float wet = clampf((p.water - (pos_at<FAST>(b, i).y - b.radius[i])) / (2.0f * b.radius[i]), 0.0f, 1.0f);
+        const float wet = clampf((p.water - (pos_at<MODE>(b, i).y - b.radius[i])) / (2.0f * b.radius[i]), 0.0f, 1.0f);
         fy += WATER_BUOYANCY * m * p.gravity * wet;
     }
 #endif
@@ -448,11 +448,11 @@ __device__ float2 node_force(Body& b, unsigned i, const Params& p) {
 
 // Air and water drag on each bone at its midpoint, shared by its two nodes,
 // never more than half the bone's speed in one substep.
-template <bool FAST>
+template <int MODE>
 __device__ void bone_drag(Body& b, const Params& p) {
     for (unsigned j = 0u; j < b.bones; j++) {
         const unsigned i0 = b.pivot[j], i1 = j + 1u;
-        const float wx = 0.5f * (vel_at<FAST>(b, i0).x + vel_at<FAST>(b, i1).x), wy = 0.5f * (vel_at<FAST>(b, i0).y + vel_at<FAST>(b, i1).y);
+        const float wx = 0.5f * (vel_at<MODE>(b, i0).x + vel_at<MODE>(b, i1).x), wy = 0.5f * (vel_at<MODE>(b, i0).y + vel_at<MODE>(b, i1).y);
         const float speed = sqrtf(wx * wx + wy * wy);
         const float width = b.radius[i0] + b.radius[i1];
         const float bone_mass = b.mass[i0] + b.mass[i1];
@@ -461,10 +461,10 @@ __device__ void bone_drag(Body& b, const Params& p) {
         float dfx = -wx * k_air, dfy = -wy * k_air;
 #if WATER
         {
-            const float wet0 = clampf((p.water - (pos_at<FAST>(b, i0).y - b.radius[i0])) / (2.0f * b.radius[i0]), 0.0f, 1.0f);
-            const float wet1 = clampf((p.water - (pos_at<FAST>(b, i1).y - b.radius[i1])) / (2.0f * b.radius[i1]), 0.0f, 1.0f);
+            const float wet0 = clampf((p.water - (pos_at<MODE>(b, i0).y - b.radius[i0])) / (2.0f * b.radius[i0]), 0.0f, 1.0f);
+            const float wet1 = clampf((p.water - (pos_at<MODE>(b, i1).y - b.radius[i1])) / (2.0f * b.radius[i1]), 0.0f, 1.0f);
             const float wet = 0.5f * (wet0 + wet1);
-            const float ax = (pos_at<FAST>(b, i1).x - pos_at<FAST>(b, i0).x) / b.length[j], ay = (pos_at<FAST>(b, i1).y - pos_at<FAST>(b, i0).y) / b.length[j];
+            const float ax = (pos_at<MODE>(b, i1).x - pos_at<MODE>(b, i0).x) / b.length[j], ay = (pos_at<MODE>(b, i1).y - pos_at<MODE>(b, i0).y) / b.length[j];
             const float along = wx * ax + wy * ay;
             const float lx = ax * along, ly = ay * along;
             const float sx = wx - lx, sy = wy - ly;
@@ -474,54 +474,54 @@ __device__ void bone_drag(Body& b, const Params& p) {
         }
 #endif
         const float s0 = 0.5f * H * b.inv_m[i0], s1 = 0.5f * H * b.inv_m[i1];
-        vel_at<FAST>(b, i0).x += s0 * dfx;
-        vel_at<FAST>(b, i0).y += s0 * dfy;
-        vel_at<FAST>(b, i1).x += s1 * dfx;
-        vel_at<FAST>(b, i1).y += s1 * dfy;
+        vel_at<MODE>(b, i0).x += s0 * dfx;
+        vel_at<MODE>(b, i0).y += s0 * dfy;
+        vel_at<MODE>(b, i1).x += s1 * dfx;
+        vel_at<MODE>(b, i1).y += s1 * dfy;
     }
 }
 
 // Every bone back to its length, the move shared by the inverse masses.
-template <bool FAST>
+template <int MODE>
 __device__ void solve_bones(Body& b) {
     for (unsigned j = 0u; j < b.bones; j++) {
         const unsigned i0 = b.pivot[j], i1 = j + 1u;
-        const float dx = pos_at<FAST>(b, i1).x - pos_at<FAST>(b, i0).x, dy = pos_at<FAST>(b, i1).y - pos_at<FAST>(b, i0).y;
+        const float dx = pos_at<MODE>(b, i1).x - pos_at<MODE>(b, i0).x, dy = pos_at<MODE>(b, i1).y - pos_at<MODE>(b, i0).y;
         const float len = fmaxf(sqrtf(dx * dx + dy * dy), 1e-9f);
         const float w0 = b.inv_m[i0], w1 = b.inv_m[i1];
         const float s = (len - b.length[j]) / ((w0 + w1) * len);
-        pos_at<FAST>(b, i0).x += w0 * s * dx;
-        pos_at<FAST>(b, i0).y += w0 * s * dy;
-        pos_at<FAST>(b, i1).x -= w1 * s * dx;
-        pos_at<FAST>(b, i1).y -= w1 * s * dy;
+        pos_at<MODE>(b, i0).x += w0 * s * dx;
+        pos_at<MODE>(b, i0).y += w0 * s * dy;
+        pos_at<MODE>(b, i1).x -= w1 * s * dx;
+        pos_at<MODE>(b, i1).y -= w1 * s * dy;
     }
 }
 
 // Every joint back inside its range.
-template <bool FAST>
+template <int MODE>
 __device__ void solve_joints(Body& b) {
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
-        const Joint k = joint<FAST>(b, j);
+        const Joint k = joint<MODE>(b, j);
         float error = 0.0f;
         if (k.angle < b.lo[j]) { error = k.angle - b.lo[j]; }
         if (k.angle > b.hi[j]) { error = k.angle - b.hi[j]; }
         if (error == 0.0f) { continue; }
         const float w = joint_weight(b, k);
-        if (w > 0.0f) { joint_push<FAST, false>(b, k, -error / w); }
+        if (w > 0.0f) { joint_push<MODE, false>(b, k, -error / w); }
     }
 }
 
 // Node i, if inside the ground, moves out along the ground's normal, and
 // friction takes back up to mu times that move of its slide over the
 // substep. The moves give the contact forces of a recording.
-template <bool FAST>
+template <int MODE>
 __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 #if GROUND
-    const float2 g = ground(pos_at<FAST>(b, i).x, b.amp, b.qphase, p);
+    const float2 g = ground(pos_at<MODE>(b, i).x, b.amp, b.qphase, p);
     const float secant = sqrtf(1.0f + g.y * g.y);
     const float nx = -g.y / secant, ny = 1.0f / secant;
-    const float dry = (pos_at<FAST>(b, i).y - g.x) / secant - b.radius[i];
+    const float dry = (pos_at<MODE>(b, i).y - g.x) / secant - b.radius[i];
 #if MUD
     const float depth = -(dry + p.mud);
     const float sink = clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH);
@@ -532,17 +532,17 @@ __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 #endif
     if (depth <= 0.0f) { return; }
 #if ICE
-    mu *= 1.0f - p.patches * ice_at(pos_at<FAST>(b, i).x);
+    mu *= 1.0f - p.patches * ice_at(pos_at<MODE>(b, i).x);
 #endif
-    pos_at<FAST>(b, i).x += nx * depth;
-    pos_at<FAST>(b, i).y += ny * depth;
+    pos_at<MODE>(b, i).x += nx * depth;
+    pos_at<MODE>(b, i).y += ny * depth;
     // The slide along the ground since the substep began.
     const float tx = ny, ty = -nx;
-    const float slide = (pos_at<FAST>(b, i).x - fp_at<FAST>(b, i).x) * tx + (pos_at<FAST>(b, i).y - fp_at<FAST>(b, i).y) * ty;
+    const float slide = (pos_at<MODE>(b, i).x - fp_at<MODE>(b, i).x) * tx + (pos_at<MODE>(b, i).y - fp_at<MODE>(b, i).y) * ty;
     const float budget = mu * depth;
     const float back = fabsf(slide) <= budget ? slide : copysignf(budget, slide);
-    pos_at<FAST>(b, i).x -= tx * back;
-    pos_at<FAST>(b, i).y -= ty * back;
+    pos_at<MODE>(b, i).x -= tx * back;
+    pos_at<MODE>(b, i).y -= ty * back;
 #if RECORD
     b.normal_force[i] += b.mass[i] * depth * INV_H * INV_H;
     b.friction_force[i] += b.mass[i] * back * INV_H * INV_H;
@@ -552,54 +552,54 @@ __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 
 // Joint damping: each joint loses a share of its turning speed every
 // substep, with equal and opposite pushes that keep the body's momentum.
-template <bool FAST>
+template <int MODE>
 __device__ void damp_joints(Body& b) {
     const float share = fminf(H * INV_JOINT_DAMPING, 1.0f);
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
-        const Joint k = joint<FAST>(b, j, false);
-        const float rate = k.g_tip.x * vel_at<FAST>(b, k.tip).x + k.g_tip.y * vel_at<FAST>(b, k.tip).y
-                         + k.g_far.x * vel_at<FAST>(b, k.far).x + k.g_far.y * vel_at<FAST>(b, k.far).y
-                         + k.g_hub.x * vel_at<FAST>(b, k.hub).x + k.g_hub.y * vel_at<FAST>(b, k.hub).y;
+        const Joint k = joint<MODE>(b, j, false);
+        const float rate = k.g_tip.x * vel_at<MODE>(b, k.tip).x + k.g_tip.y * vel_at<MODE>(b, k.tip).y
+                         + k.g_far.x * vel_at<MODE>(b, k.far).x + k.g_far.y * vel_at<MODE>(b, k.far).y
+                         + k.g_hub.x * vel_at<MODE>(b, k.hub).x + k.g_hub.y * vel_at<MODE>(b, k.hub).y;
         const float w = joint_weight(b, k);
-        if (w > 0.0f) { joint_push<FAST, true>(b, k, -share * rate / w); }
+        if (w > 0.0f) { joint_push<MODE, true>(b, k, -share * rate / w); }
     }
 }
 
 // One substep: forces, prediction, constraints, velocities.
-template <bool FAST>
+template <int MODE>
 __device__ void substep(Body& b, const float* __restrict__ muscles, const Params& p) {
-    muscle_forces<FAST>(b, muscles, p);
-    bone_drag<FAST>(b, p);
+    muscle_forces<MODE>(b, muscles, p);
+    bone_drag<MODE>(b, p);
     for (unsigned i = 0u; i < b.nodes; i++) {
-        const float2 f = node_force<FAST>(b, i, p);
-        vel_at<FAST>(b, i).x += H * (f.x + fp_at<FAST>(b, i).x) * b.inv_m[i];
-        vel_at<FAST>(b, i).y += H * (f.y + fp_at<FAST>(b, i).y) * b.inv_m[i];
+        const float2 f = node_force<MODE>(b, i, p);
+        vel_at<MODE>(b, i).x += H * (f.x + fp_at<MODE>(b, i).x) * b.inv_m[i];
+        vel_at<MODE>(b, i).y += H * (f.y + fp_at<MODE>(b, i).y) * b.inv_m[i];
 #if AIR
-        vel_at<FAST>(b, i).x *= p.air_sub;
-        vel_at<FAST>(b, i).y *= p.air_sub;
+        vel_at<MODE>(b, i).x *= p.air_sub;
+        vel_at<MODE>(b, i).y *= p.air_sub;
 #endif
-        fp_at<FAST>(b, i) = pos_at<FAST>(b, i);
-        pos_at<FAST>(b, i).x += H * vel_at<FAST>(b, i).x;
-        pos_at<FAST>(b, i).y += H * vel_at<FAST>(b, i).y;
+        fp_at<MODE>(b, i) = pos_at<MODE>(b, i);
+        pos_at<MODE>(b, i).x += H * vel_at<MODE>(b, i).x;
+        pos_at<MODE>(b, i).y += H * vel_at<MODE>(b, i).y;
     }
-    solve_bones<FAST>(b);
-    solve_joints<FAST>(b);
+    solve_bones<MODE>(b);
+    solve_joints<MODE>(b);
     for (unsigned i = 0u; i < b.nodes; i++) {
-        solve_ground<FAST>(b, i, p);
-        vel_at<FAST>(b, i).x = (pos_at<FAST>(b, i).x - fp_at<FAST>(b, i).x) * INV_H;
-        vel_at<FAST>(b, i).y = (pos_at<FAST>(b, i).y - fp_at<FAST>(b, i).y) * INV_H;
+        solve_ground<MODE>(b, i, p);
+        vel_at<MODE>(b, i).x = (pos_at<MODE>(b, i).x - fp_at<MODE>(b, i).x) * INV_H;
+        vel_at<MODE>(b, i).y = (pos_at<MODE>(b, i).y - fp_at<MODE>(b, i).y) * INV_H;
     }
-    damp_joints<FAST>(b);
+    damp_joints<MODE>(b);
 }
 
 // Whether a joint is forced past its range by more than JOINT_BREAK.
-template <bool FAST>
+template <int MODE>
 __device__ unsigned long long broken_joints(Body& b) {
     unsigned long long bits = 0ull;
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
-        const float angle = joint<FAST>(b, j).angle;
+        const float angle = joint<MODE>(b, j).angle;
         if (angle < b.lo[j] - JOINT_BREAK || angle > b.hi[j] + JOINT_BREAK) { bits |= 1ull << j; }
     }
     return bits;
@@ -608,17 +608,17 @@ __device__ unsigned long long broken_joints(Body& b) {
 #if RECORD
 // Frame t of a recording: node positions, then per muscle its energy and
 // pull, then per node its contact forces, then the broken joints.
-template <bool FAST>
+template <int MODE>
 __device__ void record_frame(float2* __restrict__ frames, unsigned t, Body& b, const Params& p) {
     const unsigned fb = t * p.stride;
     for (unsigned i = 0u; i < b.nodes; i++) {
-        frames[fb + i] = make_float2(pos_at<FAST>(b, i).x, pos_at<FAST>(b, i).y);
+        frames[fb + i] = make_float2(pos_at<MODE>(b, i).x, pos_at<MODE>(b, i).y);
         frames[fb + MAXN + b.muscles + i] = make_float2(b.normal_force[i], b.friction_force[i]);
     }
     for (unsigned k = 0u; k < b.muscles; k++) {
         frames[fb + MAXN + k] = make_float2(b.energy[k], b.pull[k]);
     }
-    const unsigned long long broken = broken_joints<FAST>(b);
+    const unsigned long long broken = broken_joints<MODE>(b);
     frames[fb + p.stride - 1u] = make_float2(__uint_as_float((unsigned)broken), __uint_as_float((unsigned)(broken >> 32)));
 }
 #endif
@@ -653,14 +653,14 @@ struct Lane {
 // Creatures a warp claims from the wave's counter at a time.
 #define CHUNK 32u
 
-// A body too large for shared memory.
+// A body with more than NS nodes.
 __device__ __forceinline__ bool is_big(const uint4* __restrict__ heads, unsigned cidx) {
     return (heads[2u * cidx].x & 255u) > NS;
 }
 
 // Starts creature `cidx` on this lane: its constants, its start pose and its
 // totals.
-template <bool FAST>
+template <int MODE>
 __device__ __forceinline__ void begin_creature(
     Body& b, Lane& ln, unsigned cidx,
     const unsigned* __restrict__ records,
@@ -696,10 +696,10 @@ __device__ __forceinline__ void begin_creature(
         b.inv_m[i] = 1.0f / b.mass[i];
         b.radius[i] = __uint_as_float(r[1]);
         b.fric[i] = __uint_as_float(r[2]);
-        pos_at<FAST>(b, i).x = __uint_as_float(r[3]);
-        pos_at<FAST>(b, i).y = __uint_as_float(r[4]);
+        pos_at<MODE>(b, i).x = __uint_as_float(r[3]);
+        pos_at<MODE>(b, i).y = __uint_as_float(r[4]);
         b.feet |= (r[5] & 1u) << i;
-        vel_at<FAST>(b, i).x = 0.0f; vel_at<FAST>(b, i).y = 0.0f;
+        vel_at<MODE>(b, i).x = 0.0f; vel_at<MODE>(b, i).y = 0.0f;
         b.normal_force[i] = 0.0f; b.friction_force[i] = 0.0f;
     }
     const unsigned* bone_rec = rec + b.nodes * NODE_WORDS;
@@ -716,7 +716,7 @@ __device__ __forceinline__ void begin_creature(
     }
 #if RECORD
     // The settling frames show the start pose.
-    for (unsigned t = 0u; t <= SETTLE; t++) { record_frame<FAST>(frames, t, b, p); }
+    for (unsigned t = 0u; t <= SETTLE; t++) { record_frame<MODE>(frames, t, b, p); }
     ln.scoring = true;
 #endif
     Result& mt = ln.mt;
@@ -727,7 +727,7 @@ __device__ __forceinline__ void begin_creature(
     mt.screened = 0.0f;
     Tally& tl = ln.tl;
     tl.contact_bits = 0u; tl.lift_bits = 0u; tl.ground_bits = 0u; tl.head_shake = 0.0f;
-    tl.head_at = pos_at<FAST>(b, 0u); tl.head_vel = make_float2(0.0f, 0.0f);
+    tl.head_at = pos_at<MODE>(b, 0u); tl.head_vel = make_float2(0.0f, 0.0f);
     tl.rung_x = 0u; tl.rung_speed = 0u; tl.rung_early = 0u; tl.rung_late = 0u; tl.rung_bits = 0u;
     ln.limp = false;
     ln.step = 0u;
@@ -736,7 +736,7 @@ __device__ __forceinline__ void begin_creature(
 // One step of the creature on this lane: its muscles' drive, the substeps,
 // and what the step leaves (distance, height, contacts, the rungs). When the
 // trial ends, its result is stored and the lane is free.
-template <bool FAST>
+template <int MODE>
 __device__ __forceinline__ void run_step(
     Body& b, Lane& ln,
     const float* __restrict__ muscles,
@@ -760,7 +760,7 @@ __device__ __forceinline__ void run_step(
 #endif
     muscle_demands(b, mus, t_now, ln.limp);
     for (unsigned s = 0u; s < SUBSTEPS; s++) {
-        substep<FAST>(b, mus, p);
+        substep<MODE>(b, mus, p);
     }
 #if RECORD
     for (unsigned i = 0u; i < b.nodes; i++) {
@@ -774,16 +774,16 @@ __device__ __forceinline__ void run_step(
     float center_y = 0.0f, com_x = 0.0f, low = 1e20f, high = -1e20f;
     unsigned touching = 0u, lifted = 0u;
     for (unsigned i = 0u; i < b.nodes; i++) {
-        failed = failed || !(fabsf(pos_at<FAST>(b, i).x) <= 1e6f && fabsf(pos_at<FAST>(b, i).y) <= 1e6f);
-        center_y += pos_at<FAST>(b, i).y;
-        com_x += b.mass[i] * pos_at<FAST>(b, i).x;
-        low = fminf(low, pos_at<FAST>(b, i).y - b.radius[i]);
-        high = fmaxf(high, pos_at<FAST>(b, i).y + b.radius[i]);
+        failed = failed || !(fabsf(pos_at<MODE>(b, i).x) <= 1e6f && fabsf(pos_at<MODE>(b, i).y) <= 1e6f);
+        center_y += pos_at<MODE>(b, i).y;
+        com_x += b.mass[i] * pos_at<MODE>(b, i).x;
+        low = fminf(low, pos_at<MODE>(b, i).y - b.radius[i]);
+        high = fmaxf(high, pos_at<MODE>(b, i).y + b.radius[i]);
 #if GROUND
-        const float2 g = ground(pos_at<FAST>(b, i).x, b.amp, b.qphase, p);
+        const float2 g = ground(pos_at<MODE>(b, i).x, b.amp, b.qphase, p);
         const float floor_y = g.x + b.radius[i] * sqrtf(1.0f + g.y * g.y);
-        if (pos_at<FAST>(b, i).y <= floor_y + CONTACT_SLACK) { touching |= 1u << i; }
-        if (pos_at<FAST>(b, i).y > floor_y + LIFT_CLEARANCE) { lifted |= 1u << i; }
+        if (pos_at<MODE>(b, i).y <= floor_y + CONTACT_SLACK) { touching |= 1u << i; }
+        if (pos_at<MODE>(b, i).y > floor_y + LIFT_CLEARANCE) { lifted |= 1u << i; }
 #endif
     }
     center_y /= (float)b.nodes;
@@ -806,16 +806,16 @@ __device__ __forceinline__ void run_step(
     // HEAD_SHAKE_WINDOW. The head's velocity is its move over each
     // 1/60 s, so the measure is the same at every step rate.
     if ((step + 1u) % HEAD_SAMPLE == 0u) {
-        const float2 v = make_float2((pos_at<FAST>(b, 0u).x - tl.head_at.x) * 60.0f, (pos_at<FAST>(b, 0u).y - tl.head_at.y) * 60.0f);
+        const float2 v = make_float2((pos_at<MODE>(b, 0u).x - tl.head_at.x) * 60.0f, (pos_at<MODE>(b, 0u).y - tl.head_at.y) * 60.0f);
         const float ax = (v.x - tl.head_vel.x) * 60.0f, ay = (v.y - tl.head_vel.y) * 60.0f;
         if (t_now >= HEAD_SHAKE_WINDOW) {
             const float accel = sqrtf(ax * ax + ay * ay);
             tl.head_shake += (accel - tl.head_shake) * fminf(1.0f / (HEAD_SHAKE_WINDOW * 60.0f), 1.0f);
         }
-        tl.head_at = pos_at<FAST>(b, 0u);
+        tl.head_at = pos_at<MODE>(b, 0u);
         tl.head_vel = v;
     }
-    const bool broken = broken_joints<FAST>(b) != 0ull;
+    const bool broken = broken_joints<MODE>(b) != 0ull;
 #if RECORD
     if (ln.scoring) {
 #endif
@@ -823,7 +823,7 @@ __device__ __forceinline__ void run_step(
     mt.lift_lo = __uint_as_float(tl.lift_bits);
     mt.ground_lo = __uint_as_float(tl.ground_bits);
     mt.head_shake = tl.head_shake;
-    const bool fell = pos_at<FAST>(b, 0u).y < pos_at<FAST>(b, 1u).y || broken || tl.head_shake > HEAD_SHAKE_LIMIT || failed;
+    const bool fell = pos_at<MODE>(b, 0u).y < pos_at<MODE>(b, 1u).y || broken || tl.head_shake > HEAD_SHAKE_LIMIT || failed;
     bool ended = false;
     if (fell) {
         mt.fall_time = t_now + DT;
@@ -968,7 +968,7 @@ __device__ __forceinline__ void run_step(
     }
 #if RECORD
     }
-    record_frame<FAST>(frames, SETTLE + step + 1u, b, p);
+    record_frame<MODE>(frames, SETTLE + step + 1u, b, p);
     if (step + 1u >= p.steps) {
         results[ln.cidx] = ln.kept;
         ln.live = false;
@@ -981,9 +981,9 @@ __device__ __forceinline__ void run_step(
 // One thread per creature: runs its trial and tallies its behavior. A warp
 // claims runs of CHUNK creatures from the wave's counter, and its lanes take
 // creatures from the claim as they free up. The host sorts creatures by
-// their muscles and then their nodes, so a claim holds alike bodies, and a
-// warp runs the bodies of one class together: those of at most NS nodes keep
-// their moving state in shared memory, the rest in the thread's own memory.
+// their muscles and then their nodes, so a claim holds alike bodies. A warp
+// runs bodies of one class at a time: mode 0 for those of at most NS nodes
+// and mode 1, with half its lanes, for the others.
 extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned* __restrict__ records,
     const float* __restrict__ muscles,
@@ -1004,13 +1004,15 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     ln.live = false;
     // The warp's claim: `win` holds creatures of one class that no lane has
     // taken yet, `chunk` creatures that it has claimed and not yet sorted into
-    // classes. `fast` is the class of the window and of every running lane.
+    // classes. `mode` is the class of the window and of every running lane.
     unsigned win_cur = 0u, win_end = 0u, chunk_cur = 0u, chunk_end = 0u;
-    bool claimed_all = false, fast = true;
+    bool claimed_all = false;
+    int mode = 0;
     for (;;) {
         __syncwarp();
         // Free lanes take creatures from the window.
-        unsigned need = ~__ballot_sync(FULL, ln.live);
+        unsigned usable = mode == 0 ? FULL : 0xffffu;
+        unsigned need = ~__ballot_sync(FULL, ln.live) & usable;
         unsigned fresh = 0u;
         unsigned mine_at = 0u;
         while (need != 0u) {
@@ -1041,22 +1043,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             const unsigned run_end = other != 0u ? chunk_cur + (unsigned)(__ffs(other) - 1) : chunk_end;
             // Running lanes must finish before the warp changes class.
             const bool running = (__ballot_sync(FULL, ln.live) | fresh) != 0u;
-            if (running && fast == big) { break; }
-            fast = !big;
+            if ((mode == 1) != big) {
+                if (running) { break; }
+                mode = big ? 1 : 0;
+                usable = mode == 0 ? FULL : 0xffffu;
+                need = usable;
+            }
             win_cur = chunk_cur;
             win_end = run_end;
             chunk_cur = run_end;
         }
         if (((fresh >> lane) & 1u) != 0u) {
             ln.live = true;
-            if (fast) {
-                begin_creature<true>(b, ln, p.base + mine_at, records, heads, p
+            if (mode == 0) {
+                begin_creature<0>(b, ln, p.base + mine_at, records, heads, p
 #if RECORD
                     , frames
 #endif
                     );
             } else {
-                begin_creature<false>(b, ln, p.base + mine_at, records, heads, p
+                begin_creature<1>(b, ln, p.base + mine_at, records, heads, p
 #if RECORD
                     , frames
 #endif
@@ -1065,14 +1071,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         }
         if (__ballot_sync(FULL, ln.live) == 0u) { break; }
         if (ln.live) {
-            if (fast) {
-                run_step<true>(b, ln, muscles, results, p
+            if (mode == 0) {
+                run_step<0>(b, ln, muscles, results, p
 #if RECORD
                     , frames
 #endif
                     );
             } else {
-                run_step<false>(b, ln, muscles, results, p
+                run_step<1>(b, ln, muscles, results, p
 #if RECORD
                     , frames
 #endif
