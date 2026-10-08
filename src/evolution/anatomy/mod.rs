@@ -128,8 +128,8 @@ impl<'a> Context<'a> {
 ///   parent node `a` to its child node `b`, node 0 is the head, and the bone at
 ///   the head is the neck. Bones an operator adds keep that convention, with
 ///   `a` the node already in the tree.
-/// - It keeps within `cfg.max_nodes` and `cfg.max_muscles`, and it never
-///   removes the head or the neck.
+/// - An operator keeps within `cfg.max_nodes` and `cfg.max_muscles`, and it
+///   never removes the head or the neck.
 /// - The caller runs `repair` after it (`offspring` does). `repair` clamps
 ///   genes, restores canonical order and the muscle ring, and lines the nodes
 ///   up with the bone lengths.
@@ -148,9 +148,9 @@ pub(super) static OPERATORS: std::sync::LazyLock<Vec<(&'static str, Operator)>> 
     });
 
 /// The operators of the `gait_*` and `idea_*` files, one list per file. Each
-/// file's operators share one pick slot, so their many operators do not crowd
-/// out the others. Every one is a compound operator (a whole change, with no
-/// parameter noise after it).
+/// file's operators share one pick slot, so the many operators of these files
+/// do not crowd out the others. Every one is a compound operator (a whole
+/// change, with no parameter noise after it).
 const GAIT_FILES: &[&[(&str, Operator)]] = &[
     gait_legs::OPS,
     gait_spine::OPS,
@@ -509,8 +509,8 @@ pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> MuscleIds
         .collect()
 }
 
-/// Whether the body has room for `nodes` more nodes and `muscles` more
-/// muscles.
+/// Whether the body has room for `nodes` more nodes and `muscles` more muscles
+/// under `cfg.max_nodes` and `cfg.max_muscles`.
 pub(super) fn room(c: &Creature, cfg: &Config, nodes: usize, muscles: usize) -> bool {
     c.nodes.len() + nodes <= cfg.max_nodes.min(MAX_NODES)
         && c.muscles.len() + muscles <= cfg.max_muscles.min(MAX_MUSCLES)
@@ -750,8 +750,9 @@ mod tests {
     }
 
     /// Operator names are unique, every name in `SHARED_SLOT` and
-    /// `CONTROLLER_SLOT` is an operator, and the pick slots together hold each
-    /// operator once.
+    /// `CONTROLLER_SLOT` is an operator, the pick slots together hold each
+    /// operator once, and the operators with a slot of their own keep table
+    /// order.
     #[test]
     fn operator_names_are_unique() {
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
