@@ -1,17 +1,17 @@
-//! Gait operators: the trunk as a spine: flexing backs, tails, necks that balance a gait.
+//! Gait operators for a flexing back, and for tails and necks that balance a
+//! gait. They share one pick slot (`GAIT_FILES` in `mod.rs`) and are compound,
+//! so a child made by one gets no parameter noise after it. A leg is any leaf
+//! limb (`rhythm::leaf_limbs`, a tail included), the trunk is every bone in no
+//! leg and not the neck, and a spine joint joins two trunk bones.
 //!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
-//!
-//! The trunk is every bone that is in no leg (`rhythm::leaf_limbs`) and is not
-//! the neck. A spine joint joins two trunk bones. The sources are the bounding
-//! gaits of fast mammals, where the back flexes once per stride in time with
-//! the legs and stores energy in elastic tissue (Alexander 1988, Hildebrand
-//! 1959 on the gallop), tails and necks that move the centre of mass against
-//! the legs (Libby et al. 2012, Full and Koditschek 1999 on templates), and
-//! the central pattern generators that lock a back to the legs with a fixed
-//! phase (Ijspeert 2008). Sims (1994) and Lipson and Pollack (2000) showed
-//! that bodies of segments with a joint between them move well.
+//! The sources are the bounding gaits of fast mammals, where the back flexes
+//! once per stride in time with the legs and stores energy in elastic tissue
+//! (Alexander 1988, Hildebrand 1959 on the gallop), tails and necks that move
+//! the centre of mass against the legs (Libby et al. 2012, Full and Koditschek
+//! 1999 on templates), the central pattern generators that lock a back to the
+//! legs with a fixed phase (Ijspeert 2008), and the finding that bodies of
+//! segments with a joint between them move well (Sims 1994, Lipson and Pollack
+//! 2000).
 use super::Operator;
 use super::compound::{close_ring, hinge_muscle, lead_muscle, shed_tips, shift_group, strongest};
 use super::junctions::{add, add_node, keep_strokes, pos, scale, spans, sub, turn_branch};
@@ -26,7 +26,8 @@ use crate::evolution::{
     Bone, Creature, JOINT_LIMIT, MAX_NODES, Muscle, NO_SENSOR, Rng, max_bone_length,
 };
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name. Add each new one here. The pick slot draws
+/// an index into this list, so reordering it changes the search for a seed.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("spine_flex_muscle", spine_flex_muscle),
     ("spine_lock_to_legs", spine_lock_to_legs),
@@ -44,7 +45,7 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("arch_back", arch_back),
 ];
 
-/// For each bone, whether it is in a leg.
+/// For each bone, whether it is in a leg (a leaf limb, a tail included).
 fn leg_flags(c: &Creature) -> [bool; MAX_NODES] {
     let mut flags = [false; MAX_NODES];
     for limb in leaf_limbs(c) {
@@ -71,7 +72,7 @@ fn trunk_joints(c: &Creature, legs: &[bool; MAX_NODES]) -> BoneIds {
 }
 
 /// The trunk bones that hang from another trunk bone: the joints of the
-/// spine proper, without the neck joint.
+/// spine proper, without the one at the base of the neck.
 fn spine_joints(c: &Creature, legs: &[bool; MAX_NODES]) -> BoneIds {
     let parents = parent_bones(c);
     (0..c.bones.len())
@@ -80,7 +81,8 @@ fn spine_joints(c: &Creature, legs: &[bool; MAX_NODES]) -> BoneIds {
         .collect()
 }
 
-/// The muscles across spine joints that have a stroke.
+/// The driven muscles of the back: those with a stroke (`long` above `short`)
+/// and both ends on trunk bones.
 fn spine_muscles(c: &Creature, legs: &[bool; MAX_NODES]) -> MuscleIds {
     (0..c.muscles.len())
         .filter(|&i| {
@@ -92,8 +94,9 @@ fn spine_muscles(c: &Creature, legs: &[bool; MAX_NODES]) -> MuscleIds {
         .collect()
 }
 
-/// The muscle that drives the legs, to time the back and the tail by: the
-/// strongest muscle on a leg, or the strongest muscle of the body.
+/// A copy of the muscle that drives the legs, to time the back and the tail
+/// by: the muscle with the most drive among those that have a stroke and an end
+/// on a leg, or else the muscle with the most drive in the body.
 fn leg_lead(c: &Creature, legs: &[bool; MAX_NODES]) -> Option<Muscle> {
     let on: MuscleIds = (0..c.muscles.len())
         .filter(|&i| {
@@ -116,8 +119,9 @@ fn rear_direction(c: &Creature) -> f32 {
     if c.nodes[0].x > mean { -1.0 } else { 1.0 }
 }
 
-/// The leaf limb that works as a tail: the one whose tip is farthest to the
-/// rear of the whole body, and held off the ground.
+/// The leaf limb that works as a tail: the first one whose tip lies within
+/// 0.02 m of the rearmost node (the head does not count) and has its underside
+/// more than 0.05 m above the ground.
 fn tail_limb(c: &Creature) -> Option<BoneIds> {
     let dir = rear_direction(c);
     let rearmost = c.nodes[1..]
@@ -130,8 +134,11 @@ fn tail_limb(c: &Creature) -> Option<BoneIds> {
     })
 }
 
-/// Sets the phase of every muscle of `group` (and its touchdown reset) so the
-/// strongest one is at `target`, keeping the others' offsets from it.
+/// Shifts the phase and the touchdown reset of every muscle of `group` by one
+/// amount, so the strongest one lands on `target` and the others keep their
+/// offsets from it. Returns whether anything moved. It does nothing for an
+/// empty group, or when the strongest muscle is within 0.01 of a cycle of the
+/// target.
 fn retime_to(c: &mut Creature, group: &[usize], target: f32) -> bool {
     let Some(anchor) = strongest(c, group) else {
         return false;
@@ -145,10 +152,11 @@ fn retime_to(c: &mut Creature, group: &[usize], target: f32) -> bool {
 }
 
 /// Cuts bone `j` at `frac` of its length with a new node and a new bone
-/// below it, and returns the new bone. The bone keeps its upper part, its
-/// children stay on the lower node, and every muscle end stays at the same
-/// point of the body, so the pose does not change. The new joint starts with
-/// a narrow range. A touchdown sensor on a moved endpoint is dropped.
+/// below it, and returns the new bone. The bone keeps its upper part and its
+/// children stay on the lower node, so they now hang from the new bone. Every
+/// muscle end and organ stays at the same point of the body, so the pose does
+/// not change. The new joint starts with a range of 0.15 to 0.5 rad each way.
+/// A touchdown sensor that would end up on the new node is dropped.
 fn split_bone(c: &mut Creature, j: usize, frac: f32, rng: &mut Rng) -> usize {
     let old = c.bones[j];
     let (a, b) = (old.a as usize, old.b as usize);
