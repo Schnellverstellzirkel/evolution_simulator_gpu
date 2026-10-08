@@ -245,20 +245,30 @@ __shared__ float2 s_pos[NS * BLOCK];
 __shared__ float2 s_vel[NS * BLOCK];
 __shared__ float2 s_fp[NS * BLOCK];
 
-// One creature's constants and state, in the thread's own memory.
+// One creature's constants and the state of its muscles, in the thread's own
+// memory. The positions, velocities and forces of its nodes are in the tables
+// above.
 struct Body {
     unsigned nodes, bones, muscles;
+    // `total_mass` is loaded and not used. `inv_mass` is one over it. `amp` is
+    // the height of this creature's ground bumps and `qphase` their phase.
     float total_mass, inv_mass, amp, qphase;
-    // Nodes.
+    // Nodes: mass, inverse mass, radius and friction coefficient. Bit i of
+    // `feet` is set when node i is a foot.
     float mass[MAXN], inv_m[MAXN], radius[MAXN], fric[MAXN];
     unsigned feet;
-    // Bones: bone j joins node pivot[j] to node j + 1.
+    // Bones: bone j joins node pivot[j] to node j + 1. `parent` is the bone
+    // that bone j turns against, or 0xff for none. `lo` and `hi` are the range
+    // of its joint in radians.
     unsigned char pivot[MAXN], parent[MAXN];
     float length[MAXN], lo[MAXN], hi[MAXN];
-    // Muscles: energy store (1 rested), rhythm offset, drive of the step
-    // before the store and Hill's relation, force of the last substep.
+    // Muscles: the energy store (1 when rested), the rhythm offset that a
+    // touchdown sets, the demand of the step before the store and Hill's
+    // relation scale it, and the pull of the last substep, which only a
+    // recording sets.
     float energy[MAXM], offset[MAXM], demand[MAXM], pull[MAXM];
-    // Contact forces of the last step per node, for a recording.
+    // The contact forces per node, the push of the ground and the friction,
+    // averaged over the last step. Only a recording fills them.
     float normal_force[MAXN], friction_force[MAXN];
 };
 
@@ -276,16 +286,19 @@ __device__ __forceinline__ float2& vel_at(Body&, unsigned i) { return s_vel[node
 template <int MODE>
 __device__ __forceinline__ float2& fp_at(Body&, unsigned i) { return s_fp[node_slot<MODE>(i)]; }
 
-// Joint j: the relative angle of bone j to its parent bone, near the middle
-// of its range, and its gradient. A joint moves three nodes: the tip of
-// bone j (`tip`), the parent bone's far end (`far`) and the node they share
-// (`hub`), whose gradient is minus the sum of the other two because the
-// angle does not change when the body moves.
+// A joint: the relative angle of a bone to its parent bone and its gradient.
+// A joint moves three nodes: the tip of the bone (`tip`), the parent bone's
+// far end (`far`) and the node they share (`hub`). The gradient of `hub` is
+// minus the sum of the other two, because moving all three nodes by the same
+// amount does not change the angle.
 struct Joint {
     unsigned tip, far, hub;
     float2 g_tip, g_far, g_hub;
     float angle;
 };
+// Joint j of the body. Its angle is taken within half a turn of the middle of
+// the joint's range. With `with_angle` false the `atan2` is skipped and the
+// angle is 0, for the callers that need only the gradients.
 template <int MODE>
 __device__ Joint joint(Body& b, unsigned j, bool with_angle = true) {
     Joint k;
@@ -308,7 +321,8 @@ __device__ Joint joint(Body& b, unsigned j, bool with_angle = true) {
     }
     // d(atan2(w))/dw = perp(w) / |w|^2, perp(w) = (-w.y, w.x). The angle is
     // atan2(v) - atan2(u): the tip of v counts +, the tip of u counts -, and
-    // the pivot of u counts +.
+    // the pivot of u counts +. At the head the far node is the tip of u, so
+    // `g_far` has the opposite sign there.
     k.g_tip = make_float2(-v.y / vv, v.x / vv);
     const float2 g_u = make_float2(-u.y / uu, u.x / uu);
     k.g_far = at_head ? make_float2(-g_u.x, -g_u.y) : g_u;
@@ -316,8 +330,9 @@ __device__ Joint joint(Body& b, unsigned j, bool with_angle = true) {
     return k;
 }
 
-// The joint's stiffness denominator: the inverse masses times the squared
-// gradients.
+// The sum over the joint's three nodes of the inverse mass times the squared
+// gradient. A push of `lambda` along the gradients moves the angle by `lambda`
+// times this weight.
 __device__ float joint_weight(const Body& b, const Joint& k) {
     return b.inv_m[k.tip] * (k.g_tip.x * k.g_tip.x + k.g_tip.y * k.g_tip.y)
          + b.inv_m[k.far] * (k.g_far.x * k.g_far.x + k.g_far.y * k.g_far.y)
@@ -345,8 +360,13 @@ __device__ void joint_push(Body& b, const Joint& k, float lambda) {
 struct MusclePull {
     // The two bones' pivot and tip nodes.
     unsigned a0, a1, b0, b1;
+    // The anchors, as shares of the bones' lengths from their pivots. Then
+    // Hill's factor on the lengthening speed, the force cap (N), one over the
+    // capacity of the energy store (1/J), the stiffness of the tendon (N/m) and
+    // the slack length (m).
     float anchor_a, anchor_b, hill, cap, inv_capacity, tendon_k, slack;
 };
+// The first two lines of the muscle record at `m`.
 __device__ MusclePull load_pull(const float* __restrict__ m) {
     const float4* q = reinterpret_cast<const float4*>(m);
     const float4 r0 = q[0], r1 = q[1];
@@ -366,9 +386,15 @@ __device__ MusclePull load_pull(const float* __restrict__ m) {
     return u;
 }
 struct MuscleRhythm {
+    // `amplitude` is the stroke of one cycle in meters and `inv_period` is one
+    // over the period in seconds. `stiffness` is a factor on the muscle's
+    // demand. A touchdown of node `sensor` restarts the rhythm at the phase
+    // `reset`.
     float amplitude, inv_period, phase, duty, inv_duty, inv_complement, stiffness, reset;
+    // The sensor node, or `NONE` for a muscle that has no sensor.
     unsigned sensor;
 };
+// The last three lines of the muscle record at `m`.
 __device__ MuscleRhythm load_rhythm(const float* __restrict__ m) {
     const float4* q = reinterpret_cast<const float4*>(m);
     const float4 r2 = q[2], r3 = q[3], r4 = q[4];
@@ -385,8 +411,9 @@ __device__ MuscleRhythm load_rhythm(const float* __restrict__ m) {
     return u;
 }
 
-// Each muscle's drive for the step starting at `t`: it follows the rhythm's
-// shortening speed over the step, and a limp muscle has none.
+// Each muscle's demand for the step that starts at time `t`: the speed at
+// which its rhythm shortens it over the step, times a quarter of its
+// stiffness, and never below 0. A limp muscle has no demand.
 __device__ void muscle_demands(Body& b, const float* __restrict__ muscles, float t, bool limp) {
     for (unsigned k = 0u; k < b.muscles; k++) {
         const MuscleRhythm u = load_rhythm(muscles + k * MUSCLE_WORDS);
@@ -397,7 +424,8 @@ __device__ void muscle_demands(Body& b, const float* __restrict__ muscles, float
     }
 }
 
-// Sets the muscles' forces for one substep.
+// Fills the force table with the pull of every muscle for one substep and
+// updates the energy stores. A muscle pulls its two anchors together.
 template <int MODE>
 __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const Params& p) {
     for (unsigned i = 0u; i < b.nodes; i++) { fp_at<MODE>(b, i) = make_float2(0.0f, 0.0f); }
@@ -418,11 +446,14 @@ __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const 
         const float ex = dx / len, ey = dy / len;
         // Lengthening speed of the muscle.
         const float lengthening = (bvx - avx) * ex + (bvy - avy) * ey;
+        // The step's demand, scaled by the energy store.
         float drive = b.demand[k] * b.energy[k];
         // Hill: the active pull falls with the shortening speed.
         if (u.hill > 0.0f) {
             drive *= clampf(1.0f + lengthening * u.hill, 0.0f, 1.0f);
         }
+        // A light damper on the change of length adds to the drive. The sum
+        // stays within the force cap.
         const float active = clampf(drive + lengthening * 0.15f, -u.cap, u.cap);
         // Only active shortening is charged to the store, which recovers.
         const float work = fminf(drive, u.cap) * fmaxf(-lengthening, 0.0f) * H;
@@ -434,6 +465,8 @@ __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const 
 #if RECORD
         b.pull[k] = pull;
 #endif
+        // The pull acts along the muscle. Each anchor's share goes to the two
+        // nodes of its bone by where the anchor sits.
         const float fx = ex * pull, fy = ey * pull;
         fp_at<MODE>(b, a0).x += fx * (1.0f - u.anchor_a);
         fp_at<MODE>(b, a0).y += fy * (1.0f - u.anchor_a);
@@ -455,21 +488,28 @@ __device__ float2 node_force(Body& b, unsigned i, const Params& p) {
     fx += p.wind * m;
 #endif
 #if MUD || BRAMBLES
+    // How far the node's surface is above the ground, along the ground's
+    // normal. It is negative when the node is sunk in.
     const float2 g = ground(pos_at<MODE>(b, i).x, b.amp, b.qphase, p);
     const float dry = (pos_at<MODE>(b, i).y - g.x) / sqrtf(1.0f + g.y * g.y) - b.radius[i];
 #endif
 #if MUD
+    // Mud drags the horizontal velocity of a sunk node. The drag grows with
+    // the sink depth, up to `p.mud`, and is `MUD_DRAG` per second at
+    // `MUD_FULL_DEPTH`.
     fx -= m * MUD_DRAG * (clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH)) * vel_at<MODE>(b, i).x;
 #endif
 #if BRAMBLES
-    // Brambles hold back every node but the feet while it touches the
-    // ground: a drag against its velocity.
+    // Brambles hold back every node but the feet while its surface is within
+    // `BRAMBLE_REACH` of the ground: a drag against its horizontal velocity.
     if (((b.feet >> i) & 1u) == 0u && dry < BRAMBLE_REACH) {
         fx -= m * p.brambles * vel_at<MODE>(b, i).x;
     }
 #endif
 #if WATER
     {
+        // Buoyancy is `WATER_BUOYANCY` of the node's weight times the share of
+        // its diameter under the water line `p.water`.
         const float wet = clampf((p.water - (pos_at<MODE>(b, i).y - b.radius[i])) / (2.0f * b.radius[i]), 0.0f, 1.0f);
         fy += WATER_BUOYANCY * m * p.gravity * wet;
     }
@@ -478,7 +518,10 @@ __device__ float2 node_force(Body& b, unsigned i, const Params& p) {
 }
 
 // Air and water drag on each bone at its midpoint, shared by its two nodes,
-// never more than half the bone's speed in one substep.
+// never more than half the bone's speed in one substep. The air drag grows
+// with the bone's length, width and speed. The water drag also grows with the
+// share of the bone under water. It acts across the bone in full and along it
+// at `WATER_ALONG` of that.
 template <int MODE>
 __device__ void bone_drag(Body& b, const Params& p) {
     for (unsigned j = 0u; j < b.bones; j++) {
@@ -492,6 +535,9 @@ __device__ void bone_drag(Body& b, const Params& p) {
         float dfx = -wx * k_air, dfy = -wy * k_air;
 #if WATER
         {
+            // The wet share is the mean of the two nodes'. The vector (ax, ay)
+            // points along the bone. The midpoint velocity splits into the part
+            // along it (lx, ly) and the part across it (sx, sy).
             const float wet0 = clampf((p.water - (pos_at<MODE>(b, i0).y - b.radius[i0])) / (2.0f * b.radius[i0]), 0.0f, 1.0f);
             const float wet1 = clampf((p.water - (pos_at<MODE>(b, i1).y - b.radius[i1])) / (2.0f * b.radius[i1]), 0.0f, 1.0f);
             const float wet = 0.5f * (wet0 + wet1);
@@ -512,7 +558,8 @@ __device__ void bone_drag(Body& b, const Params& p) {
     }
 }
 
-// Every bone back to its length, the move shared by the inverse masses.
+// Moves the two nodes of every bone back to the bone's length. The move is
+// shared by the inverse masses, so the lighter node moves more.
 template <int MODE>
 __device__ void solve_bones(Body& b) {
     for (unsigned j = 0u; j < b.bones; j++) {
@@ -528,7 +575,9 @@ __device__ void solve_bones(Body& b) {
     }
 }
 
-// Every joint back inside its range.
+// Every joint back inside its range. A joint outside its range gets one push
+// along its gradients that takes back the whole error. Bone 0 and a bone with
+// no parent have no joint.
 template <int MODE>
 __device__ void solve_joints(Body& b) {
     for (unsigned j = 1u; j < b.bones; j++) {
@@ -545,7 +594,8 @@ __device__ void solve_joints(Body& b) {
 
 // Node i, if inside the ground, moves out along the ground's normal, and
 // friction takes back up to mu times that move of its slide over the
-// substep. The moves give the contact forces of a recording.
+// substep. The moves give the contact forces of a recording. Without `GROUND`
+// the world has no floor and this does nothing.
 template <int MODE>
 __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 #if GROUND
@@ -554,6 +604,8 @@ __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
     const float nx = -g.y / secant, ny = 1.0f / secant;
     const float dry = (pos_at<MODE>(b, i).y - g.x) / secant - b.radius[i];
 #if MUD
+    // In mud the floor is `p.mud` deeper, and a node that has sunk in has a
+    // larger friction budget.
     const float depth = -(dry + p.mud);
     const float sink = clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH);
     float mu = b.fric[i] * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
@@ -563,11 +615,13 @@ __device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 #endif
     if (depth <= 0.0f) { return; }
 #if ICE
+    // Ice patches take a share of the friction away.
     mu *= 1.0f - p.patches * ice_at(pos_at<MODE>(b, i).x);
 #endif
     pos_at<MODE>(b, i).x += nx * depth;
     pos_at<MODE>(b, i).y += ny * depth;
-    // The slide along the ground since the substep began.
+    // The slide along the ground since the substep began. Friction takes back
+    // the slide, but no more than the budget.
     const float tx = ny, ty = -nx;
     const float slide = (pos_at<MODE>(b, i).x - fp_at<MODE>(b, i).x) * tx + (pos_at<MODE>(b, i).y - fp_at<MODE>(b, i).y) * ty;
     const float budget = mu * depth;
@@ -600,8 +654,13 @@ __device__ void damp_joints(Body& b) {
 // One substep: forces, prediction, constraints, velocities.
 template <int MODE>
 __device__ void substep(Body& b, const float* __restrict__ muscles, const Params& p) {
+    // The muscles' pulls go to the force table. The drag on the bones changes
+    // the velocities.
     muscle_forces<MODE>(b, muscles, p);
     bone_drag<MODE>(b, p);
+    // Per node: the world's force and the muscles' pull change the velocity,
+    // and `AIR` keeps a share of it. The force table takes the position at the
+    // start of the substep, and then the node moves.
     for (unsigned i = 0u; i < b.nodes; i++) {
         const float2 f = node_force<MODE>(b, i, p);
         vel_at<MODE>(b, i).x += H * (f.x + fp_at<MODE>(b, i).x) * b.inv_m[i];
@@ -616,6 +675,8 @@ __device__ void substep(Body& b, const float* __restrict__ muscles, const Params
     }
     solve_bones<MODE>(b);
     solve_joints<MODE>(b);
+    // Per node: the ground moves it out and friction takes back its slide.
+    // Then its velocity is its move over the substep.
     for (unsigned i = 0u; i < b.nodes; i++) {
         solve_ground<MODE>(b, i, p);
         vel_at<MODE>(b, i).x = (pos_at<MODE>(b, i).x - fp_at<MODE>(b, i).x) * INV_H;
@@ -624,7 +685,8 @@ __device__ void substep(Body& b, const float* __restrict__ muscles, const Params
     damp_joints<MODE>(b);
 }
 
-// Whether a joint is forced past its range by more than JOINT_BREAK.
+// The joints forced past their range by more than `JOINT_BREAK`, as bits. Bit
+// j is the joint of bone j.
 template <int MODE>
 __device__ unsigned long long broken_joints(Body& b) {
     unsigned long long bits = 0ull;
@@ -637,8 +699,11 @@ __device__ unsigned long long broken_joints(Body& b) {
 }
 
 #if RECORD
-// Frame t of a recording: node positions, then per muscle its energy and
-// pull, then per node its contact forces, then the broken joints.
+// Writes frame `t` of a recording, `p.stride` slots of two floats. First come
+// the `MAXN` node positions. Then come one pair per muscle (energy store and
+// pull) and one pair per node (push of the ground and friction). The last slot
+// holds the broken joints as two words of bits. See
+// `creature_kernel::frame_stride`.
 template <int MODE>
 __device__ void record_frame(float2* __restrict__ frames, unsigned t, Body& b, const Params& p) {
     const unsigned fb = t * p.stride;
