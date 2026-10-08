@@ -378,13 +378,11 @@ impl Experiment {
                 .then(a.cmp(&b))
         });
         for (rank, &j) in rest.iter().enumerate() {
+            // Past the limit of the round, an entrant is left for a later
+            // round to ask for. `need` is not empty then, so the verdict is
+            // `Confirm` and no result is final.
             if rank < MAX_CONFIRMS_PER_ROUND {
                 need.push(j);
-            } else {
-                // Past the limit of the round. A later round asks for it:
-                // `need` is not empty here, so the verdict is `Confirm`, this
-                // result is not final and the mark is never seen.
-                out[j].excluded = true;
             }
         }
         if need.is_empty() {
