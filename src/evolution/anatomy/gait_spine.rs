@@ -217,11 +217,12 @@ fn split_bone(c: &mut Creature, j: usize, frac: f32, rng: &mut Rng) -> usize {
     new
 }
 
-/// Adds a muscle to a back joint that has none, timed with the legs: in
-/// phase with the strongest leg muscle or half a cycle after it. A flexing
-/// back adds length to the stride of a galloping mammal, because the hind
-/// legs reach farther forward while the fore legs reach back (Hildebrand
-/// 1959). The muscle gets the leg muscle's rhythm period.
+/// Adds a muscle across a random spine joint that no driven muscle bends. The
+/// muscle is a copy of the strongest leg muscle with a gentle stroke around its
+/// own span (`hinge_muscle`), and it runs in phase with that muscle or half a
+/// cycle after it. A flexing back adds length to the stride of a galloping
+/// mammal, because the hind legs reach farther forward while the fore legs
+/// reach back (Hildebrand 1959).
 pub(crate) fn spine_flex_muscle(
     c: &mut Creature,
     cfg: &Config,
@@ -241,10 +242,12 @@ pub(crate) fn spine_flex_muscle(
 }
 
 /// Puts every driven muscle of the back on the period of the strongest leg
-/// muscle and a fixed phase against it: with it, a quarter of a cycle after
-/// it or half a cycle after it. A back and legs on one clock is the coupling
-/// that a central pattern generator gives an animal (Ijspeert 2008), and it
-/// stops the back from beating against the stride.
+/// muscle and shifts their phases by one common amount, so that the strongest
+/// of them runs in phase with the leg muscle, a quarter of a cycle after it or
+/// half a cycle after it. The others keep their offsets from it. A back and
+/// legs on one clock is the coupling that a central pattern generator gives an
+/// animal (Ijspeert 2008), and it stops the back from beating against the
+/// stride.
 pub(crate) fn spine_lock_to_legs(
     c: &mut Creature,
     _cfg: &Config,
@@ -273,12 +276,13 @@ pub(crate) fn spine_lock_to_legs(
         .any(|(&i, b)| (c.muscles[i].period, c.muscles[i].phase) != b)
 }
 
-/// Cuts a long trunk bone in two at its middle, so the back has one more
-/// joint, and bends the new joint with a muscle that runs a sixth to a third
-/// of a cycle behind the legs. A back of two or more segments can arch and
-/// stretch (the cheetah's spine) where one rigid trunk cannot (Sims 1994
-/// built segmented bodies with a joint between segments). The body gives back
-/// its idlest limb tip, so the creature stays as big as it was.
+/// Cuts a trunk bone longer than 0.12 m in two, at 0.4 to 0.6 of its length,
+/// so the back has one more joint. A muscle bends the new joint and runs 0.17
+/// to 0.33 of a cycle behind the strongest leg muscle. A back of two or more
+/// segments can arch and stretch (the cheetah's spine) where one rigid trunk
+/// cannot (Sims 1994 built segmented bodies with a joint between segments).
+/// The body gives back an idle limb tip if it has one (`shed_tips`), so the
+/// creature stays as big as it was. Then `close_ring` closes the motor ring.
 pub(crate) fn split_spine_bone(
     c: &mut Creature,
     cfg: &Config,
@@ -560,11 +564,13 @@ pub(crate) fn split_neck_bone(
     true
 }
 
-/// Narrows every trunk joint to a flex of 0.05 to 0.15 rad each way and
-/// shortens the stroke of the muscles that cross them to 40% of what it was,
-/// so the trunk becomes one near-rigid frame that the legs move. Many fast
-/// animals with a short stride hold the trunk still and let the legs do the
-/// work (Cheney et al. 2013 found rigid, regular bodies move well).
+/// Narrows every trunk joint with a stop more than 0.05 rad beyond a flex of
+/// 0.05 to 0.15 rad, so that neither of its stops lies beyond that flex. If a
+/// joint narrowed, it also shortens the stroke of every muscle between a trunk
+/// joint and a bone in no leg to 40% of what it was, about its midpoint. The
+/// trunk becomes one near-rigid frame that the legs move. Many fast animals
+/// with a short stride hold the trunk still and let the legs do the work
+/// (Cheney et al. 2013 found rigid, regular bodies move well).
 pub(crate) fn stiffen_trunk_joints(
     c: &mut Creature,
     _cfg: &Config,
@@ -602,10 +608,12 @@ pub(crate) fn stiffen_trunk_joints(
     true
 }
 
-/// Widens the trunk joints to a flex of 0.5 to 0.9 rad each way and gives one
-/// of them a muscle if no muscle bends it, timed half a cycle after the
-/// strongest leg muscle. A loose trunk can arch and stretch with the stride
-/// (a bounding weasel or a galloping horse), which a stiff one cannot.
+/// Widens every trunk joint with a stop more than 0.05 rad inside a flex of 0.5
+/// to 0.9 rad, so that both of its stops reach at least that flex. It also
+/// gives a random trunk joint a muscle if no driven muscle bends it, timed half
+/// a cycle after the strongest leg muscle. A loose trunk can arch and stretch
+/// with the stride (a bounding weasel or a galloping horse), which a stiff one
+/// cannot.
 pub(crate) fn loosen_trunk_joints(
     c: &mut Creature,
     cfg: &Config,
@@ -634,12 +642,13 @@ pub(crate) fn loosen_trunk_joints(
     changed
 }
 
-/// Orders the driven muscles of the back by their distance from the head,
-/// puts them on one period and steps their phase by 0.08 to 0.25 of a cycle
-/// from one to the next, toward the tail or toward the head. The result is
-/// a travelling wave of bending along the back, as in the swimming of a fish
-/// or the trot of a salamander (Ijspeert 2008, a chain of coupled oscillators
-/// along the spine). It needs two driven spine muscles.
+/// Orders the driven muscles of the back by the distance from the head to the
+/// node their two bones share, gives them the period of the first, and steps
+/// their phase from its phase by 0.08 to 0.25 of a cycle from one to the next,
+/// toward the tail or toward the head. The result is a travelling wave of
+/// bending along the back, as in the swimming of a fish or the trot of a
+/// salamander (Ijspeert 2008, a chain of coupled oscillators along the spine).
+/// It needs two driven spine muscles.
 pub(crate) fn spine_phase_wave(
     c: &mut Creature,
     _cfg: &Config,
@@ -674,9 +683,10 @@ pub(crate) fn spine_phase_wave(
 }
 
 /// Gives the driven muscles of the back an elastic tendon of 0.3 to 0.8, so
-/// the back stores the energy of a stretch and returns it. The cheetah and the
-/// horse recover a large part of the stride's energy in the spring-like back
-/// and its tendons (Alexander 1988), and an elastic back needs less muscle
+/// the back stores the energy of a stretch and returns it. A muscle whose
+/// tendon is already within 0.1 of that, or stiffer, keeps it. The cheetah and
+/// the horse recover a large part of the stride's energy in the spring-like
+/// back and its tendons (Alexander 1988), and an elastic back needs less muscle
 /// work for the same flex.
 pub(crate) fn elastic_spine(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leg_flags(c);
@@ -692,12 +702,12 @@ pub(crate) fn elastic_spine(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
     changed
 }
 
-/// Starts a back joint bent by 0.08 to 0.3 rad toward a hump (the part below
-/// the joint tips down), and moves its stops with it, so the joint can still
-/// reach every pose it could before. A back that starts arched is loaded like
-/// a spring and stretches out as the body extends (the gather phase of the
-/// bounding gait). Only joints that keep the starting pose inside their range
-/// are used.
+/// Starts a random trunk joint bent by 0.08 to 0.3 rad toward a hump (the part
+/// below the joint tips down), and moves its stops with it, so the joint can
+/// still reach every pose it could before, within the joint limit. A back that
+/// starts arched is loaded like a spring and stretches out as the body extends
+/// (the gather phase of the bounding gait). Only joints that keep the starting
+/// pose at least 0.02 rad inside both stops are used.
 pub(crate) fn arch_back(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leg_flags(c);
     let joints = trunk_joints(c, &legs);
