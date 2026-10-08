@@ -96,9 +96,9 @@ impl Experiment {
     /// has a record. An elite queued again after a world change is such a
     /// creature. The change text compares the creature with the genes in its
     /// parent's record. That record is usually there, because the parent
-    /// entered an archive in an earlier block. If it is gone, the text names
-    /// only the emitter and the crossover. If `prune_lineage` stripped its
-    /// genes, every node, muscle and organ of the creature counts as new.
+    /// entered an archive in an earlier block. If it is gone, or if
+    /// `prune_lineage` stripped its genes, the text names only the emitter and
+    /// the crossover.
     pub(super) fn ancestor_of(
         &self,
         population: &Population,
@@ -118,9 +118,12 @@ impl Experiment {
         } else {
             0.0
         };
+        // A record that `prune_lineage` stripped holds the empty creature.
+        // Compared with it, every node of the child would count as new.
         let parent_body = birth
             .parent_id
             .and_then(|id| self.lineage.get(&id))
+            .filter(|a| !a.creature.is_empty())
             .map(|a| a.creature.unpack());
         let change = describe_change(parent_body.as_ref(), &creature, birth.emitter, birth.mate);
         Some((
