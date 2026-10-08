@@ -54,9 +54,9 @@ fn mirror_flip_body(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Conte
 }
 
 /// The joints of one leg bend the other way, or, half the time, those of every
-/// bone but the neck: each range (min, max) becomes (-max, -min), so a knee that
-/// bent forward bends back. A body with its nodes where they were stands the
-/// same and moves differently.
+/// bone but the neck: each range (min, max) becomes (-max, -min), so a knee
+/// that bent forward bends back. A body with its nodes where they were stands
+/// the same and moves differently.
 fn flip_joint_ranges(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let bones: BoneIds = match some_leg(c, rng, 1, false) {
         Some(leg) if coin(rng) => leg,
@@ -74,8 +74,9 @@ fn flip_joint_ranges(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
 
 /// Shifts every node above the median height along x, by `by` times its height
 /// above the median (forward when `by` is positive): a lean of the upper body.
-/// The head is left out of both the median and the shift, and a body with fewer
-/// than 3 nodes besides the head is left alone. Returns whether any node moved.
+/// The median is the higher middle one when the count is even. The head is left
+/// out of both the median and the shift, and a body with fewer than 3 nodes
+/// besides the head is left alone. Returns whether any node moved.
 fn lean(c: &mut Creature, by: f32) -> bool {
     let mut ys: Vec<f32> = (1..c.nodes.len()).map(|n| c.nodes[n].y).collect();
     if ys.len() < 3 {
@@ -110,8 +111,8 @@ fn slope_lean(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
     lean(c, rng.range(0.15, 0.35) * cfg.slope.signum())
 }
 
-/// One leg that has a muscle is picked, and every muscle with an end on it takes
-/// a random phase: a limb gone out of step.
+/// One leg that has a muscle is picked, and every muscle with an end on it
+/// takes a random phase: a limb gone out of step.
 fn limb_roulette(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
@@ -124,8 +125,8 @@ fn limb_roulette(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
 }
 
 /// Up to three muscles join random pairs of bones. Each joins two different
-/// bones that no muscle joins yet, at random anchors, and has a random rhythm of
-/// its own. A body with fewer than 3 bones is left alone.
+/// bones that no muscle joins yet, at random anchors, and has a random rhythm
+/// of its own. A body with fewer than 3 bones is left alone.
 fn muscle_confetti(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let bones = c.bones.len();
     if bones < 3 || !room(c, cfg, 0, 1) {
@@ -180,9 +181,10 @@ fn scooter_mode(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -
 }
 
 /// Every muscle with an end on a limb whose root sits above the median root
-/// height (an arm) starts half a cycle later, so an arm that swung with the legs
-/// now swings against them (Herr and Popovic 2008). A muscle with an end on two
-/// arms moves once. Does nothing with fewer than two limbs.
+/// height (an arm) starts half a cycle later, so an arm that swung with the
+/// legs now swings against them (Herr and Popovic 2008). The median is the
+/// higher middle one when the count is even, so the operator needs at least
+/// three limbs to change anything. A muscle with an end on two arms moves once.
 fn arms_against_legs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let limbs = leaf_limbs(c);
     if limbs.len() < 2 {
@@ -208,8 +210,9 @@ fn arms_against_legs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Cont
 
 /// Each leg shorter than 2.5 times the hurdle height grows toward that length,
 /// by at most 1.4 times and within the bone limits (`scale_branch`): a leg that
-/// cannot clear a step is no use. A leg's length is the sum of its bone lengths.
-/// Does nothing when the hurdle height (`Config::hurdles`) is under 0.01 m.
+/// cannot clear a step is no use. A leg's length is the sum of its bone
+/// lengths. Does nothing when the hurdle height (`Config::hurdles`) is under
+/// 0.01 m.
 fn hurdle_legs(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if cfg.hurdles < 0.01 {
         return false;
