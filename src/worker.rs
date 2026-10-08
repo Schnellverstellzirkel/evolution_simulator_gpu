@@ -471,9 +471,10 @@ pub struct Snapshot {
     /// Creatures per second over complete generations in the last ~10 s,
     /// including archive updates, breeding, and transfers.
     pub end_to_end: f64,
-    /// Bytes allocated on the GPUs, as `Gpu::allocated_bytes` has them. Only
-    /// `Gpu::evaluate_with_metrics` refreshes that value and the worker never
-    /// calls it, so here it stays 0.
+    /// Bytes allocated on the GPUs, as `Gpu::allocated_bytes` has them. The
+    /// worker refreshes that value on every pass (`Gpu::refresh_allocated_bytes`).
+    /// Each engine updates its share after a submission, and a closed engine
+    /// holds none.
     pub gpu_bytes: u64,
     /// Bytes the ring and the creatures of the global archive hold in memory.
     pub ram_bytes: usize,
@@ -745,8 +746,8 @@ impl Loop {
     }
     /// One pass of the worker's loop. It reads the commands, checks a load in
     /// progress and the pause flags, takes one step of evolution, logs GPU and
-    /// autosave notices, publishes a snapshot when one is due and runs a
-    /// requested save. `Break` ends the loop.
+    /// autosave notices, refreshes the GPU byte count, publishes a snapshot
+    /// when one is due and runs a requested save. `Break` ends the loop.
     fn pass(&mut self) -> ControlFlow<()> {
         let first = self.next_command()?;
         self.handle_commands(first)?;
@@ -758,6 +759,7 @@ impl Loop {
         self.step();
         self.log_gpu_notices();
         self.log_autosave();
+        self.gpu.refresh_allocated_bytes();
         self.publish_if_due();
         self.save_pending();
         ControlFlow::Continue(())
