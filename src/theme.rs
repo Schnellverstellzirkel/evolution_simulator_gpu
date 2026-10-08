@@ -341,10 +341,6 @@ pub fn backdrop(painter: &egui::Painter, rect: Rect) {
     }
 }
 
-/// Does nothing. The flat poster panels have no wear to paint. The side panel
-/// in `ui.rs` still calls it, and every argument is unused.
-pub fn wear(_painter: &egui::Painter, _rect: Rect, _theme: Theme, _seed: f32) {}
-
 /// Paints a card in `rect`: a translucent drop shadow offset down and to the
 /// right, the `fill` and a dark outline inside the rect. `lit` draws the
 /// outline in the accent color and thicker.
