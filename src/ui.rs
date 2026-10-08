@@ -1288,10 +1288,7 @@ impl eframe::App for App {
                     .fill(theme.panel)
                     .inner_margin(GAP_L as i8),
             )
-            .show(ui, |ui| {
-                crate::theme::wear(ui.painter(), ui.max_rect().expand(GAP_L), theme, 7.);
-                self.controls(ui)
-            });
+            .show(ui, |ui| self.controls(ui));
         self.central_panel(ui, theme);
         self.dialogs(&ctx);
         self.help_window(&ctx);
