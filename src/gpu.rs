@@ -11,8 +11,9 @@ pub struct Gpu {
     /// The names of the devices that evaluate. `new` and
     /// `evaluate_with_metrics` copy them from the scheduler.
     pub name: String,
-    /// Bytes allocated on all the GPUs, as the scheduler reported them after
-    /// the last `evaluate_with_metrics`. It is 0 before then.
+    /// Bytes allocated on all the GPUs, as the scheduler reported them at the
+    /// last `evaluate_with_metrics` or `refresh_allocated_bytes`. It is 0
+    /// before then.
     pub allocated_bytes: u64,
     /// The scheduler for creature evaluation. `new` always fills it. The
     /// worker treats `None` as no engines, and `evaluate_with_metrics`
@@ -76,6 +77,13 @@ impl Gpu {
         self.name = sched.names();
         self.allocated_bytes = sched.allocated_bytes();
         metrics
+    }
+    /// Reads the bytes the engines hold from the scheduler into
+    /// `allocated_bytes`. The worker calls it on every pass of its loop,
+    /// because it never calls `evaluate_with_metrics`. It gives 0 without a
+    /// scheduler.
+    pub fn refresh_allocated_bytes(&mut self) {
+        self.allocated_bytes = self.sched.as_ref().map_or(0, Scheduler::allocated_bytes);
     }
     /// True when a scheduler is open, so evaluation can be queued without
     /// blocking.
