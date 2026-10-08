@@ -529,6 +529,12 @@ fn wave_blocks(count: usize, resident: usize) -> usize {
         .max(1)
 }
 
+/// Least bytes of each device buffer that holds a unit's records. A slot that
+/// grows a buffer frees the old one, and `cuMemFree` waits for all the work on
+/// the GPU, so the engine thread stalled for 0.05 to 2.2 s each time a small
+/// slot outgrew its first buffers (42 times in 3 generations at 3M).
+const MIN_UNIT_BUFFER: usize = 1 << 20;
+
 /// A standard slot as `pick_standard_slot` sees it.
 #[derive(Clone, Copy, Debug)]
 struct SlotView {
@@ -1855,7 +1861,7 @@ impl CudaEngine {
             // Nothing leaks when an allocation fails part way.
             let mut made = Vec::with_capacity(need.len());
             for bytes in need {
-                match self.alloc_device(bytes) {
+                match self.alloc_device(bytes.max(MIN_UNIT_BUFFER)) {
                     Ok(buf) => made.push(buf),
                     Err(error) => {
                         for buf in made {
