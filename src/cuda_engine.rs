@@ -499,6 +499,52 @@ fn api() -> Result<Arc<Api>> {
     .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Units of more than this many creatures are big. The main islands of a ring
+/// block make one, 100,000 creatures at 1M, while each wild island makes a
+/// small one of a few hundred.
+const BIG_UNIT: usize = 8192;
+
+/// How many of the standard slots, counted from the first, big units use.
+/// They are the only slots that ever hold the buffers of a block, so the
+/// slots of the wild islands' small units stay small however many there are.
+const BIG_SLOTS: usize = 4;
+
+/// A standard slot as `pick_standard_slot` sees it.
+#[derive(Clone, Copy, Debug)]
+struct SlotView {
+    /// No unit runs on it.
+    free: bool,
+    /// Its device buffers already hold the unit.
+    holds: bool,
+    /// Bytes of buffers it keeps.
+    bytes: u64,
+}
+
+/// The standard slot for a unit, given `views` of all of them in order. A big
+/// unit takes one of the first `big_slots` slots, which are the only ones that
+/// ever hold a block's buffers. A small unit takes one of the others, or one
+/// of the first slots when none of the others is free. In each group the slot
+/// is the free one with the least buffers that already hold the unit, so that
+/// the big buffers stay free for big units. When no free slot holds the unit
+/// it is the free one with the most buffers, which grows. `None` when no slot
+/// is free for the unit.
+fn pick_standard_slot(views: &[SlotView], big_slots: usize, big: bool) -> Option<usize> {
+    let best = |range: std::ops::Range<usize>| {
+        let free = || range.clone().filter(|&i| views[i].free);
+        free()
+            .filter(|&i| views[i].holds)
+            .min_by_key(|&i| (views[i].bytes, i))
+            .or_else(|| free().max_by_key(|&i| (views[i].bytes, std::cmp::Reverse(i))))
+    };
+    let big_slots = 0..big_slots.min(views.len());
+    let small_slots = big_slots.end..views.len();
+    if big {
+        best(big_slots)
+    } else {
+        best(small_slots).or_else(|| best(big_slots))
+    }
+}
+
 /// Most wave streams a submission slot has. Wave w of a unit runs on stream w
 /// modulo the streams in use, so a unit of more waves shares them.
 const STREAM_LIMIT: usize = 8;
@@ -608,6 +654,11 @@ impl<T: bytemuck::Pod> HostVec<T> {
     /// Bytes of memory held.
     pub fn held_bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Elements that fit in the mapping.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Maps room for at least `len` elements, with the headroom of
@@ -1833,6 +1884,32 @@ impl CudaEngine {
         Ok(())
     }
 
+    /// The free standard slot for a unit of `batches` (`pick_standard_slot`).
+    fn standard_slot_for(&self, batches: &[LaneBatch]) -> Result<usize> {
+        let creatures: usize = batches.iter().map(|b| b.slots.len()).sum();
+        let needs: Vec<[usize; 5]> = batches.iter().map(Self::needs).collect::<Result<_>>()?;
+        let views: Vec<SlotView> = self
+            .standard_slots()
+            .map(|i| {
+                let slot = &self.slots[i];
+                SlotView {
+                    free: slot.pending.is_none(),
+                    holds: needs.iter().enumerate().all(|(group, need)| {
+                        slot.groups
+                            .get(group)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|res| {
+                                res.bufs.iter().zip(need).all(|(buf, n)| buf.size >= *n)
+                            })
+                    }),
+                    bytes: Self::slot_bytes(slot),
+                }
+            })
+            .collect();
+        pick_standard_slot(&views, BIG_SLOTS, creatures > BIG_UNIT)
+            .context("No free GPU submission slot")
+    }
+
     /// Bytes of host memory a batch's buffers hold.
     pub fn held_bytes(batch: &LaneBatch) -> usize {
         batch.wave.as_ref().map_or(0, |w| {
@@ -1899,6 +1976,18 @@ impl CudaEngine {
         self.standard_slots()
             .filter(|&i| self.slots[i].pending.is_none())
             .count()
+    }
+
+    /// Number of standard submissions of `creatures` creatures that can be
+    /// queued without waiting. A big unit (`BIG_UNIT`) needs one of the first
+    /// `BIG_SLOTS` slots, and a small one takes any.
+    pub fn free_slots_for(&self, creatures: usize) -> usize {
+        let slots = if creatures > BIG_UNIT {
+            0..BIG_SLOTS.min(self.standard)
+        } else {
+            self.standard_slots()
+        };
+        slots.filter(|&i| self.slots[i].pending.is_none()).count()
     }
 
     /// Whether a confirmation trial can be queued without waiting: its slot
@@ -2017,10 +2106,7 @@ impl CudaEngine {
         } else if confirming && self.slots[self.confirm_slot()].pending.is_none() {
             self.confirm_slot()
         } else {
-            self.standard_slots()
-                .filter(|&i| self.slots[i].pending.is_none())
-                .max_by_key(|&i| (Self::slot_bytes(&self.slots[i]), std::cmp::Reverse(i)))
-                .context("No free GPU submission slot")?
+            self.standard_slot_for(batches)?
         };
         // Waves of at most `kernel::WAVE` creatures: (batch, first creature,
         // count).
@@ -2356,6 +2442,60 @@ mod tests {
             2 * kernels <= CACHE_FILES,
             "{kernels} kernels, cache {CACHE_FILES}"
         );
+    }
+
+    fn view(free: bool, holds: bool, bytes: u64) -> SlotView {
+        SlotView { free, holds, bytes }
+    }
+
+    /// Big units use the first slots only, and small units use the others
+    /// first, the smallest that holds them, so that no small unit makes a
+    /// slot big.
+    #[test]
+    fn units_take_the_slots_of_their_size() {
+        // Two big slots (the first two) and three small ones.
+        let views = [
+            view(true, true, 90),
+            view(true, true, 100),
+            view(true, true, 1),
+            view(true, true, 2),
+            view(true, false, 0),
+        ];
+        // A big unit takes the smallest big slot that holds it.
+        assert_eq!(pick_standard_slot(&views, 2, true), Some(0));
+        // A small one takes the smallest small slot that holds it.
+        assert_eq!(pick_standard_slot(&views, 2, false), Some(2));
+        // When no small slot is free it takes a big one.
+        let busy = [
+            view(true, true, 90),
+            view(true, true, 100),
+            view(false, true, 1),
+            view(false, true, 2),
+            view(false, false, 0),
+        ];
+        assert_eq!(pick_standard_slot(&busy, 2, false), Some(0));
+        // A big unit never takes a small slot, even if that is all there is.
+        let small_only = [
+            view(false, true, 90),
+            view(false, true, 100),
+            view(true, true, 1),
+            view(true, true, 2),
+            view(true, false, 0),
+        ];
+        assert_eq!(pick_standard_slot(&small_only, 2, true), None);
+        // When no free slot holds the unit, the free slot with the most
+        // buffers grows.
+        let short = [
+            view(true, false, 60),
+            view(true, false, 70),
+            view(true, false, 1),
+            view(true, false, 2),
+            view(true, false, 0),
+        ];
+        assert_eq!(pick_standard_slot(&short, 2, true), Some(1));
+        assert_eq!(pick_standard_slot(&short, 2, false), Some(3));
+        // With fewer slots than big slots every slot is a big slot.
+        assert_eq!(pick_standard_slot(&short[..1], 2, false), Some(0));
     }
 
     /// The engine asks for 32 queues when the environment has no count, and a

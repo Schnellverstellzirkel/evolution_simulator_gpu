@@ -430,10 +430,44 @@ pub fn pack(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<Lan
     pack_reusing(pop, indices, cfg, &mut Vec::new())
 }
 
+/// The batch of `spare` to pack a unit into, given the words of node and bone
+/// records, the floats of muscle records and the head words it needs. Among
+/// the batches whose memory already holds the unit it is the one with the
+/// least, so that big memory stays free for big units. When none holds it, it
+/// is the one with the most, which grows. A batch with more than 8 times the
+/// memory the unit needs, and a megabyte, is never taken: it stays for the big
+/// units, because a small unit that took it would leave the next big unit
+/// with a small batch to grow. `None` when `spare` has no batch to take.
+fn best_spare(spare: &[LaneBatch], records: usize, muscles: usize, heads: usize) -> Option<usize> {
+    let held = |b: &LaneBatch| {
+        b.wave.as_ref().map_or(0, |w| {
+            w.lanes.held_bytes()
+                + w.muscles.held_bytes()
+                + w.ends.held_bytes()
+                + w.heads.held_bytes()
+        })
+    };
+    let holds = |b: &LaneBatch| {
+        b.wave.as_ref().is_some_and(|w| {
+            w.lanes.capacity() >= records
+                && w.muscles.capacity() >= muscles
+                && w.heads.capacity() >= heads
+        })
+    };
+    let need = 4 * records + 4 * muscles + 16 * heads;
+    let limit = 8 * need + (1 << 20);
+    let taken = || (0..spare.len()).filter(|&i| held(&spare[i]) <= limit);
+    taken()
+        .filter(|&i| holds(&spare[i]))
+        .min_by_key(|&i| (held(&spare[i]), i))
+        .or_else(|| taken().max_by_key(|&i| (held(&spare[i]), std::cmp::Reverse(i))))
+}
+
 /// `pack` into the memory of a batch from `spare` (the batches of a unit that
-/// finished), when there is one. The creatures are packed sorted by muscle
-/// count, then node count, then population index. `slots` and `creatures` of
-/// the batch say which creature each packed one is.
+/// finished), when there is one: the smallest that holds the unit
+/// (`best_spare`). The creatures are packed sorted by muscle count, then node
+/// count, then population index. `slots` and `creatures` of the batch say
+/// which creature each packed one is.
 pub fn pack_reusing(
     pop: &Population,
     indices: &[usize],
@@ -467,7 +501,9 @@ pub fn pack_reusing(
         record_len += g.node_count * NODE_WORDS + g.bone_count * BONE_WORDS;
         muscle_len += g.muscle_count * MUSCLE_FIELDS;
     }
-    let (mut wave, mut slots, mut creatures, mut info) = match spare.pop() {
+    let reused = best_spare(spare, record_len.max(1), muscle_len.max(1), 2 * count)
+        .map(|at| spare.swap_remove(at));
+    let (mut wave, mut slots, mut creatures, mut info) = match reused {
         Some(mut b) => {
             b.slots.clear();
             b.creatures.clear();
@@ -568,6 +604,39 @@ mod tests {
         assert_eq!(world_label(1 | 1 << 1), "Terrain");
         assert_eq!(world_label(1 | 1 << 1 | 1 << 5), "Quake");
         assert_eq!(world_label(0), "calm");
+    }
+
+    /// A unit packs into the smallest spare batch that holds it, into the
+    /// biggest when none does, and never into one that is much too big, which
+    /// stays for the big units.
+    #[test]
+    fn a_unit_packs_into_the_smallest_spare_that_holds_it() {
+        let make = |n: usize| {
+            let cfg = Config {
+                population: n,
+                random_seed: false,
+                ..Config::default()
+            };
+            let pop = crate::evolution::create(&cfg).unwrap();
+            let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+            pack(&pop, &indices, &cfg).unwrap().pop().unwrap()
+        };
+        let (small, medium, big) = (make(300), make(3000), make(30000));
+        let need = |b: &LaneBatch| {
+            let w = b.wave.as_ref().unwrap();
+            (w.lanes.len(), w.muscles.len(), w.heads.len())
+        };
+        let (s, m, b) = (need(&small), need(&medium), need(&big));
+        let spare = vec![big, medium, small];
+        // A small unit takes the small batch, a medium one the medium batch.
+        assert_eq!(best_spare(&spare, s.0, s.1, s.2), Some(2));
+        assert_eq!(best_spare(&spare, m.0, m.1, m.2), Some(1));
+        // A big one takes the big batch, and so does one that nothing holds.
+        assert_eq!(best_spare(&spare, b.0, b.1, b.2), Some(0));
+        assert_eq!(best_spare(&spare, 10 * b.0, b.1, b.2), Some(0));
+        // The big batch is much too big for a small unit, and stays.
+        assert_eq!(best_spare(&spare[..1], s.0, s.1, s.2), None);
+        assert_eq!(best_spare(&[], 1, 1, 1), None);
     }
 
     #[test]

@@ -430,6 +430,11 @@ pub fn out_of_memory(error: &anyhow::Error) -> bool {
 trait Device {
     /// Standard units that can be submitted now.
     fn free_slots(&self) -> usize;
+    /// Standard units of `creatures` creatures that can be submitted now. A
+    /// big unit may have fewer slots than a small one.
+    fn free_slots_for(&self, _creatures: usize) -> usize {
+        self.free_slots()
+    }
     /// Whether a confirmation trial can be submitted now.
     fn confirm_free(&self) -> bool {
         self.free_slots() > 0
@@ -464,6 +469,9 @@ trait Device {
 impl Device for CudaEngine {
     fn free_slots(&self) -> usize {
         CudaEngine::free_slots(self)
+    }
+    fn free_slots_for(&self, creatures: usize) -> usize {
+        CudaEngine::free_slots_for(self, creatures)
     }
     fn confirm_free(&self) -> bool {
         CudaEngine::confirm_free(self)
@@ -847,10 +855,11 @@ fn run_units<D: Device>(
         let next: Option<Result<PackedUnit>> = if !may_submit {
             None
         } else if let Some(unit) = waiting.take() {
+            let count: usize = unit.batches.iter().map(|b| b.slots.len()).sum();
             if if is_confirmation(&unit.cfg) {
                 can_confirm
             } else {
-                can_standard
+                engine.free_slots_for(count) > 0
             } {
                 Some(Ok(unit))
             } else {
@@ -865,7 +874,12 @@ fn run_units<D: Device>(
                 &mut indices,
                 &mut confirm_spare,
             ))
-        } else if can_standard && let Some((ticket, unit, cfg)) = standard_jobs.pop_front() {
+        } else if can_standard
+            && let Some(at) = standard_jobs
+                .iter()
+                .position(|job| engine.free_slots_for(job.1.genomes.len()) > 0)
+            && let Some((ticket, unit, cfg)) = standard_jobs.remove(at)
+        {
             Some(pack_unit(ticket, unit, cfg, &mut indices, &mut spare))
         } else {
             None
