@@ -1,4 +1,9 @@
-//! Operators that copy, grow, fuse, move and reshape whole limbs.
+//! Operators that copy, grow, split, fuse, move, reshape and graft whole limbs.
+//! A limb is a branch of the body tree: a bone and every bone below it.
+//! `BASE_OPERATORS` in `mod.rs` starts with these seven operators, and
+//! `graft_from` in `mod.rs` runs `graft_donor_limb` for crossover between
+//! different body plans. The other operator files also use `fuse_pair` and
+//! the helpers `limb_roots`, `pick`, `clamped` and `narrow`.
 use super::{
     BoneIds, Context, MuscleIds, branch, branch_nodes, child_bones, copy_branch, is_neck,
     muscles_on, new_muscle, parent_bones, remove_parts, room,
@@ -13,10 +18,12 @@ use crate::evolution::{
 /// them is at least this (within about 26 degrees).
 const ALIGNED: f32 = 0.9;
 
-/// Copies a complete branch (several bones, their joints, the muscles inside
-/// it and the muscles from its root to the bone above) onto the same joint or
-/// another joint, mirrored or not, with the copied muscles shifted by one of
-/// 0, 1/4, 1/2 or 3/4 of a cycle. A working bent leg becomes a second leg.
+/// Copies one branch (a bone and every bone below it, with their joints, the
+/// muscles inside the branch and the muscles between its root bone and the
+/// bone above) onto a node. Half the time that is the node the branch hangs
+/// from, otherwise a random node but the head. Half the time the copy is
+/// mirrored left to right. Its muscles shift their phase by 0, 1/4, 1/2 or
+/// 3/4 of a cycle. A working bent leg becomes a second leg.
 pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let roots: BoneIds = limb_roots(c)
         .into_iter()
@@ -40,9 +47,11 @@ pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     copy_branch(c, cfg, root, at, place, mirror, phase).is_some()
 }
 
-/// Extends a limb tip with a short bone (a fraction of the tip bone), a joint
-/// with a narrow range, and a muscle from the new bone to the bone above,
-/// timed like a muscle near it. A direct route to ankles and toes.
+/// Adds a short bone to the end of a limb (a bone with no bone below it, not
+/// the neck). The new bone is 25% to 50% of the end bone's length, at least
+/// 3 cm, and points within 1.5 rad of that bone's direction. Its joint has a
+/// narrow range. A muscle joins it to the end bone, timed like a muscle near
+/// it. A direct route to ankles and toes.
 pub(crate) fn grow_actuated_tip(
     c: &mut Creature,
     cfg: &Config,
@@ -76,10 +85,13 @@ pub(crate) fn grow_actuated_tip(
     true
 }
 
-/// Splits a bone at a random point between 30% and 70% of its length. The new
-/// joint starts with a narrow range, existing attachments stay where they are
-/// on the body, and a muscle across the new joint (timed like one nearby)
-/// makes it an elbow or knee under control instead of a floppy hinge.
+/// Splits a bone of at least 10 cm (not the neck) at a random point between
+/// 30% and 70% of its length, so both parts stay at least 3 cm long. The new
+/// node takes the mean size and friction of the two ends, and the new joint
+/// starts with a narrow range. Muscle attachments and the organ stay where
+/// they are on the body. A new muscle across the joint, timed like a muscle
+/// near it, makes it an elbow or knee under control instead of a floppy
+/// hinge.
 pub(crate) fn split_bone_actuated(
     c: &mut Creature,
     cfg: &Config,
@@ -152,9 +164,12 @@ pub(crate) fn split_bone_actuated(
     true
 }
 
-/// Fuses two nearly aligned bones that meet at a node with no other bone
-/// (not the head or the neck) into one bone; muscles on either keep their
-/// place on the body. Evolution can decide which regions stay rigid.
+/// Fuses two nearly aligned bones (`ALIGNED`) into one. They meet at a node
+/// with no other bone below it, and the fused bone is no longer than the bone
+/// limit. The node is not the head and the upper bone is not the neck. Muscles
+/// on either bone keep their place on the body (`fuse_pair`). The joint
+/// between them goes, so evolution can decide which regions stay rigid. A body
+/// of three nodes or fewer is left alone.
 pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.nodes.len() <= 3 {
         return false;
@@ -184,8 +199,13 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
 }
 
 /// Fuses bone `upper` and the one bone `lower` below it into one bone from
-/// the top of `upper` to the tip of `lower`. Muscles on either keep their
-/// place on the body, projected onto the fused bone.
+/// the top of `upper` to the tip of `lower`. The caller checks that `lower` is
+/// the only bone below `upper`. Bone `lower` and the node between the two are
+/// removed. The fused bone keeps the joint range of `upper` and has the
+/// straight length between its ends, at least 3 cm. Muscles on either keep
+/// their place on the body, projected onto the fused bone, and muscles between
+/// the two are dropped. The fused bone gets the organ of `upper`, or the one of
+/// `lower` when `upper` has none.
 pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
     let joint = c.bones[upper].b as usize;
     let end = c.bones[lower].b;
@@ -226,8 +246,10 @@ pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
 }
 
 /// Moves a branch, with its internal shape and muscles, to another node of
-/// the body (not inside the branch, not the head). Muscles from the branch
-/// root to the old bone above move to the bone above the new node.
+/// the body. The node is not the head, not the one the branch hangs from and
+/// not inside the branch. Every node of the branch shifts by the same offset
+/// (clamped to the start region). Muscles from the branch root to the old bone
+/// above move to the bone above the new node.
 pub(crate) fn relocate_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let moves: Bounded<(u8, u8), { MAX_NODES * MAX_NODES }> = limb_roots(c)
         .into_iter()
@@ -267,9 +289,11 @@ pub(crate) fn relocate_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
     true
 }
 
-/// Scales every bone of a branch by one factor (0.7 to 1.4, within the bone
-/// limits) and the strokes of the muscles inside it with them, so a limb
-/// gets longer or shorter without scrambling its parts.
+/// Scales every bone of a branch by one factor, and the strokes of the muscles
+/// inside it with them, so a limb gets longer or shorter without scrambling
+/// its parts. The factor is drawn evenly on a log scale between 0.7 and 1.4,
+/// narrowed so that no bone ends under 3 cm or over the bone limit. The nodes
+/// scale about the root joint. A factor within 2% of 1 counts as no change.
 pub(crate) fn reshape_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(root) = pick(&limb_roots(c), rng) else {
         return false;
@@ -301,8 +325,12 @@ pub(crate) fn reshape_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
 }
 
 /// Copies a branch of `cx.donor()` (another archive elite) onto a node of this
-/// body, with the donor's joints, internal muscles and their timing. With
-/// even odds it replaces a branch of this body instead of adding one.
+/// body, with the donor's joints, organs, internal muscles and their timing.
+/// Muscles between the branch and the rest of the donor stay behind. With even
+/// odds it replaces a branch of this body, on the node that branch hung from.
+/// Otherwise it adds the graft on a random node but the head. It does nothing
+/// when there is no donor, when the donor has no limb, or when the result would
+/// pass the node or muscle limits.
 pub(crate) fn graft_donor_limb(
     c: &mut Creature,
     cfg: &Config,
@@ -360,30 +388,34 @@ pub(crate) fn graft_donor_limb(
     true
 }
 
-/// Bones that can start a limb: every bone but the neck.
+/// Bones that can start a limb: every bone but the neck, in bone order.
 pub(super) fn limb_roots(c: &Creature) -> BoneIds {
     (0..c.bones.len()).filter(|&b| !is_neck(c, b)).collect()
 }
 
-/// A random item of `items`, or `None` when there is none.
+/// A random item of `items`, or `None` when there is none. It takes one draw
+/// from `rng`, or none when `items` is empty.
 pub(super) fn pick<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
     (!items.is_empty()).then(|| items[rng.index(items.len())])
 }
 
-/// A starting position moved inside the region where nodes may start.
+/// A starting position moved inside the region where nodes may start: `x`
+/// within `body_extent()` of the origin and `y` from 0 up to `body_extent()`.
 pub(super) fn clamped(x: f32, y: f32) -> [f32; 2] {
     let extent = body_extent();
     [x.clamp(-extent, extent), y.clamp(0.0, extent)]
 }
 
-/// Gives a new joint a narrow range around its starting angle.
+/// Gives a new joint a narrow range around its starting angle: 0.15 to 0.5 rad
+/// on each side. It takes two draws from `rng`, the minimum first.
 pub(super) fn narrow(bone: &mut Bone, rng: &mut Rng) {
     bone.min_angle = -rng.range(0.15, 0.5);
     bone.max_angle = rng.range(0.15, 0.5);
 }
 
-/// A muscle on one of `bones` to take the timing from, or any muscle of the
-/// body when none is on them.
+/// A random muscle with an end on one of `bones`, to take the timing from. When
+/// none has an end there, a random muscle of the body. `None` when the body has
+/// no muscles.
 fn nearby_muscle(c: &Creature, bones: &[usize], rng: &mut Rng) -> Option<Muscle> {
     let near = muscles_on(c, bones, false);
     let pool: MuscleIds = if near.is_empty() {
@@ -399,9 +431,9 @@ mod tests {
     use super::super::{Operator, tests::bodies};
     use super::*;
 
-    /// Runs `op` on 80 test bodies, checks each changed body with `check`
-    /// (before, after) and each unchanged one for equality, and returns how
-    /// many it changed.
+    /// Runs `op` on 80 test bodies, with body 40 as the donor, checks each
+    /// changed body with `check` (before, after) and each unchanged one for
+    /// equality, and returns how many it changed.
     fn applied(op: Operator, mut check: impl FnMut(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let bodies = bodies(&cfg, 80);
@@ -561,6 +593,7 @@ mod tests {
     #[test]
     fn graft_donor_limb_adds_or_replaces_with_a_donor_branch() {
         let cfg = Config::default();
+        // The donor is body 40 of the 80, as in `applied`.
         let donor = bodies(&cfg, 80)[40].clone();
         let (mut added, mut replaced) = (0, 0);
         applied(graft_donor_limb, |before, after| {
@@ -590,6 +623,7 @@ mod tests {
             added >= 8 && replaced >= 8,
             "added {added}, replaced {replaced} of 80"
         );
+        // Without a donor the operator reports no change.
         let cx = Context::of(None);
         let mut c = donor.clone();
         assert!(!graft_donor_limb(&mut c, &cfg, &mut Rng::new(1, 0, 0), &cx));
