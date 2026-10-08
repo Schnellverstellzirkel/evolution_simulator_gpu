@@ -96,21 +96,25 @@ fn shape(c: &Creature) -> Shape {
         }
     }
     // Segments: the longest chain of parent and child nodes that all carry a
-    // leaf limb. `run[node]` is the length of the chain that ends at `node`.
+    // leaf limb. The chain that ends at a node is the node and the nodes above
+    // it that carry a leaf limb, up to the first that does not. Walking up
+    // finds it whatever the node numbers are: `split_crowded_joint` gives a
+    // parent a higher number than its child.
     let carries: Vec<bool> = (0..n)
         .map(|node| limbs.iter().any(|(top, _)| *top == node))
         .collect();
     let mut best = 0;
-    let mut run = vec![0usize; n];
-    for (node, &has) in carries.iter().enumerate() {
-        // A node continues the chain of its parent. Nodes come in index order,
-        // so the parent's chain is known only when the parent has the lower
-        // index.
-        // TODO: a parent with a higher index, as `split_crowded_joint` makes,
-        // reads 0 here, so a chain can be cut short.
-        let up = parent_bone[node].map_or(0, |b| run[c.bones[b].a as usize]);
-        run[node] = if has { up + 1 } else { 0 };
-        best = best.max(run[node]);
+    for node in (0..n).filter(|&node| carries[node]) {
+        let mut chain = 1;
+        let mut above = node;
+        while let Some(bone) = parent_bone[above] {
+            above = c.bones[bone].a as usize;
+            if !carries[above] {
+                break;
+            }
+            chain += 1;
+        }
+        best = best.max(chain);
     }
     Shape {
         leaf_limbs: limbs.len(),
