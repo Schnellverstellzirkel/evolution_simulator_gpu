@@ -3,14 +3,14 @@
 //!
 //! Every operator changes only timing (phase, period, duty, touchdown reset).
 //! Each is a whole change on its own, so its child gets no parameter noise,
-//! and the operators of this file share one pick slot.
+//! and the operators of this file share one pick slot (`GAIT_FILES` in
+//! `mod.rs`).
 //!
 //! The sources are Kuramoto (1975, coupled oscillators pull each other's phase
-//! toward the group), Collins, Ruina, Tedrake and Wisse (2005) and Ijspeert
-//! (2008, a gait as coupled oscillators with fixed phase lags), Golubitsky and
-//! Stewart (2003, symmetry of the coupling decides which gaits exist) and
-//! Weyl (1916, steps of the golden ratio spread points more evenly than any
-//! other step).
+//! toward the group), Collins and Stewart (1993) and Ijspeert (2008, a gait as
+//! coupled oscillators with fixed phase lags), Golubitsky and Stewart (2003,
+//! symmetry of the coupling decides which gaits exist) and Weyl (1916, steps of
+//! the golden ratio spread points more evenly than any other step).
 use super::ideas::{by_drive, circular_mean, coin, phase_gap, set, some_leg, wrap};
 use super::limbs::pick;
 use super::rhythm::{leaf_limbs, matching_limbs};
@@ -21,7 +21,9 @@ use crate::evolution::{Creature, NO_SENSOR, Rng, min_muscle_period};
 /// The golden ratio's fractional part.
 const GOLDEN: f32 = 0.618_034;
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name. Add each new one here. The pick slot of
+/// this file chooses by position in this list, so the order decides what a
+/// fixed seed picks.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("kuramoto_pull", kuramoto_pull),
     ("kuramoto_push", kuramoto_push),
