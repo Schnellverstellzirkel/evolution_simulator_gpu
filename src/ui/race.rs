@@ -356,13 +356,17 @@ impl App {
             );
             // Only the first lane carries the meter labels.
             if i == 0 {
+                // `ceil` makes the first tick -0.0 when the camera is less than
+                // one step left of the start line, and -0.0 prints as "-0 m".
+                // The start line reads 0 m.
+                let shown = if x == 0.0 { 0.0 } else { x };
                 lane_painter.text(
                     Pos2::new(px + 3., ground - 2.),
                     Align2::LEFT_BOTTOM,
                     if step < 1.0 {
-                        format!("{x:.1} m")
+                        format!("{shown:.1} m")
                     } else {
-                        format!("{x:.0} m")
+                        format!("{shown:.0} m")
                     },
                     FontId::proportional(14.5),
                     GROUND_INK,
