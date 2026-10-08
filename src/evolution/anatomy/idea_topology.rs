@@ -209,11 +209,12 @@ fn fork_tip(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> boo
 }
 
 /// Scales by `by` every bone that has bones below its child node, apart from
-/// the neck. That is the trunk and also the upper bones of limbs of two bones or
-/// more. Each of these bones keeps its direction and takes its new length (held
-/// between 0.05 m and the longest bone), and its child node moves with every
-/// node below it. Then every muscle refits its stroke so that it keeps its
-/// shares of its span. Returns false when no bone qualifies.
+/// the neck. That is the trunk and also the upper bones of limbs of two bones
+/// or more. Each of these bones keeps its direction and takes its new length
+/// (held between 0.05 m and the longest bone), and its child node moves with
+/// every node below it. Then every muscle refits its stroke so that it keeps
+/// its shares of its span. Returns false only when no bone qualifies, so it can
+/// return true when the length limits leave every length as it was.
 fn scale_trunk(c: &mut Creature, by: f32) -> bool {
     let children = child_bones(c);
     let trunk: BoneIds = (0..c.bones.len())
@@ -373,12 +374,12 @@ fn drop_shortest_stub(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Con
     true
 }
 
-/// A stiff, nearly fixed muscle joins two bones that meet at a joint, a bone and
-/// one that hangs from its far end, in the trunk or in a limb. It is anchored at
-/// 0.7 of the first bone and 0.3 of the second. It has a stiffness of 100, the
-/// stiffest tendon, a stroke of 1 cm and the timing of a random muscle, so the
-/// joint between the bones becomes a rigid frame. Does nothing when a muscle
-/// joins the pair already.
+/// A stiff, nearly fixed muscle joins two bones that meet at a joint, a bone
+/// and one that hangs from its far end, in the trunk or in a limb. It is
+/// anchored at 0.7 of the first bone and 0.3 of the second. It has a stiffness
+/// of 100, the stiffest tendon, a stroke of 1 cm and the timing of a random
+/// muscle, so the joint between the bones becomes a rigid frame. Does nothing
+/// when a muscle joins the pair already.
 fn brace_trunk_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -414,8 +415,8 @@ fn brace_trunk_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context
 /// A weak, springy muscle links the tips of two different legs, so one leg's
 /// stretch pulls on the other's. It is anchored at 0.8 of the last bone of each
 /// leg. It has the timing of a random muscle, at 0.4 times its stiffness (1 at
-/// least) and with a tendon of 0.6 to 1.0. The two legs are drawn independently,
-/// and the operator does nothing when they are the same one.
+/// least) and with a tendon of 0.6 to 1.0. The two legs are drawn
+/// independently, and the operator does nothing when they are the same one.
 fn leg_link_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -469,8 +470,9 @@ fn shed_tail_tip(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context)
 
 /// A bone hangs straight down from an inner node (other than the end of the
 /// neck), with the widest joint range and no muscle. It is 0.5 to 0.9 times a
-/// typical bone long and ends in a heavy node, one in the upper half of the size
-/// range. It is a pendulum that swings with the gait and moves the weight about.
+/// typical bone long and ends in a heavy node, one in the upper half of the
+/// size range. It is a pendulum that swings with the gait and moves the weight
+/// about.
 fn dangling_pendulum(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 1, 0) {
         return false;
