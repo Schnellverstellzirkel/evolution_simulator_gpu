@@ -318,12 +318,16 @@ pub(crate) fn split_spine_bone(
     true
 }
 
-/// Hangs a tail of two light bones from the rearmost trunk node that sits off
-/// the ground. The tail points backward and up and its joints are narrow. A
-/// muscle across each joint swings it half a cycle against the legs, and
-/// three quarters of a cycle for the second joint. A swinging tail moves the
-/// centre of mass against the leg thrust, as the tails of running lizards and
-/// cheetahs do (Libby et al. 2012). The body gives back its idlest limb tip.
+/// Hangs a tail of two light bones from the rearmost node that ends a trunk
+/// bone and is at least 0.15 m above the ground. Each bone is about 0.6 to 1.2
+/// times the mean bone length. The tail points backward and up, its nodes are
+/// 0.7 times as wide as the root node (but not under `cfg.min_size`), and each
+/// joint swings 0.3 to 0.8 rad each way. A muscle across the first joint runs
+/// half a cycle after the strongest leg muscle, and one across the second joint
+/// three quarters of a cycle after it. A swinging tail moves the centre of mass
+/// against the leg thrust. A lizard swings its tail in a leap to take angular
+/// momentum from its body (Libby et al. 2012). The body gives back an idle limb
+/// tip if it has one, and `close_ring` closes the motor ring.
 pub(crate) fn grow_counterweight_tail(
     c: &mut Creature,
     cfg: &Config,
@@ -395,10 +399,12 @@ pub(crate) fn grow_counterweight_tail(
     true
 }
 
-/// Makes the tip node of the tail heavier, 0.5 to 0.9 of the widest node a
-/// body may have, so the tail swings as a counterweight. Mass at the end of a
-/// long light lever gives the tail the most moment for the least extra body
-/// mass (Libby et al. 2012 used a tail with a mass at its end).
+/// Widens the tip node of the tail to 0.5 to 0.9 of the largest node diameter
+/// (`cfg.max_size`), which makes it heavier, so the tail swings as a
+/// counterweight. Nothing happens unless that is more than 1.15 times the width
+/// the tip has. Mass at the end of a long light lever gives the tail the most
+/// moment for the least extra body mass (Libby et al. 2012 used a tail with a
+/// mass at its end).
 pub(crate) fn weight_tail_tip(
     c: &mut Creature,
     cfg: &Config,
@@ -417,9 +423,12 @@ pub(crate) fn weight_tail_tip(
     true
 }
 
-/// Turns the tail down and back until its tip reaches the ground, and braces
-/// its root joint with a small flex, so the tail props the body like the tail
-/// of a kangaroo. The body is not lifted by more than a few centimetres.
+/// Turns the tail about its root joint until its first bone points to the rear
+/// and 0.9 to 1.3 rad below the horizontal, and braces that joint with a flex
+/// of 0.05 to 0.2 rad each way. If the tail then reaches below the ground, the
+/// whole body is lifted to stand on it, so the tail props the body like the
+/// tail of a kangaroo. It fails if the turn is under 0.15 rad or if the head
+/// would rise by more than 0.06 m.
 pub(crate) fn plant_tail_prop(
     c: &mut Creature,
     _cfg: &Config,
@@ -461,10 +470,12 @@ pub(crate) fn plant_tail_prop(
     true
 }
 
-/// Shifts the tail's muscles to run half a cycle against the strongest leg
-/// muscle, on the same period. A tail that swings opposite to the legs takes
-/// up the angular momentum of the stride, as in the running lizards of Libby
-/// et al. (2012), where tail and body counter-rotate.
+/// Puts the muscles with an end on the tail on the period of the strongest leg
+/// muscle and shifts their phases by one common amount, so that the strongest
+/// of them runs half a cycle after the leg muscle and the others keep their
+/// offsets from it. A tail that swings opposite to the legs takes up the
+/// angular momentum of the stride, as in the leaping lizards of Libby et al.
+/// (2012), where tail and body counter-rotate.
 pub(crate) fn tail_swing_against_legs(
     c: &mut Creature,
     _cfg: &Config,
@@ -494,11 +505,11 @@ pub(crate) fn tail_swing_against_legs(
             .any(|(&i, p)| c.muscles[i].period != p)
 }
 
-/// Gives the neck a muscle across its base joint, timed a quarter or half a
-/// cycle after the strongest leg muscle, so the head bobs with the stride.
-/// Horses and pigeons move the head against the legs to keep the centre of
-/// mass over the feet, and a swinging head is a counterweight at the end of a
-/// long lever.
+/// Gives the neck a muscle across its base joint, between the neck and a trunk
+/// bone that hangs from it, timed a quarter or half a cycle after the strongest
+/// leg muscle, so the head bobs with the stride. Horses and pigeons move the
+/// head in time with the stride, and a swinging head is a counterweight at the
+/// end of a long lever.
 pub(crate) fn neck_bob_muscle(
     c: &mut Creature,
     cfg: &Config,
@@ -523,12 +534,14 @@ pub(crate) fn neck_bob_muscle(
     hinge_muscle(c, cfg, root, &lead, phase.rem_euclid(1.0), rng)
 }
 
-/// Cuts the neck in two, so the head sits on a neck with two joints, and
-/// bends the new joint with a muscle that runs a quarter of a cycle behind the
-/// legs. The head stays the head and the neck stays attached to it. Two neck
-/// joints let the head move against the trunk with little change in the
-/// height of the shoulders, as the long neck of a giraffe or a heron does.
-/// The body gives back its idlest limb tip.
+/// Cuts the neck in two, at 0.4 to 0.6 of its length, so the head sits on a
+/// neck with two joints. A muscle bends the new joint and runs a quarter of a
+/// cycle behind the strongest leg muscle. The head stays the head and the upper
+/// part stays the neck, attached to it. Two neck joints let the head move
+/// against the trunk with little change in the height of the shoulders, as the
+/// long neck of a giraffe or a heron does. The neck must start at the head and
+/// be at least 0.1 m long. The body gives back an idle limb tip if it has one,
+/// and `close_ring` closes the motor ring.
 pub(crate) fn split_neck_bone(
     c: &mut Creature,
     cfg: &Config,
