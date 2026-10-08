@@ -28,14 +28,30 @@ fn nearest_leg(c: &Creature, x: f32) -> Option<BoneIds> {
         .min_by(|p, q| (tip_x(c, p) - x).abs().total_cmp(&(tip_x(c, q) - x).abs()))
 }
 
-/// Hangs a new leg of two bones from a node of the trunk: a thigh that points
-/// down and a shank below the knee, which bends a little forward or back. A
-/// muscle across the hip and a muscle across the knee drive it, and half the
-/// time a second hip muscle pulls the other way half a cycle later (a flexor
-/// and an extensor). The leg steps against the nearest existing leg: half a
-/// cycle after it (a walk or a trot), a quarter or three quarters (a
-/// gallop) or with it (a bound), and the knee runs a quarter cycle behind
-/// the hip. Without a leg, the leg takes the timing of the gait's main driver.
+/// Hangs a new leg of two bones from a trunk node. The node is not the head and
+/// lies more than 0.12 m above the ground. The thigh points down with a lean of
+/// up to 0.35 rad. The shank below the knee bends up to 0.5 rad forward or back
+/// from the thigh. Each bone is about 0.8 to 1.4 times the mean bone length of
+/// the existing legs (0.3 m without legs), within 0.06 to 0.6 m. Each joint can
+/// turn 0.3 to 0.8 rad to either side.
+///
+/// A muscle across the hip and a muscle across the knee drive the leg. They
+/// copy the rhythm of the strongest muscle with an end on the bone above the
+/// hip, or of the strongest muscle of the body if that bone has none. The hip
+/// muscle takes the phase of the strongest muscle on the leg whose foot is
+/// nearest the new hip along the body, plus an offset. Half a cycle makes a
+/// walk or a trot and is twice as likely as each other offset. A quarter or
+/// three quarters makes a gallop. No offset makes a bound. The knee muscle
+/// takes the hip phase plus a quarter cycle. If that leg has no muscle, or
+/// there is no leg, the hip muscle starts from the phase of the muscle with the
+/// most drive in the body instead.
+///
+/// Half the time a second hip muscle joins them. It is the hip muscle again,
+/// with its anchors mirrored along both bones and its phase half a cycle on.
+/// Then one or two of the idlest limb tips go (`shed_tips`), so the body ends
+/// at most one node bigger. The operator does nothing when there is no room for
+/// 2 nodes and 3 muscles, no trunk node to hang from, no muscle to copy or no
+/// tip to give back.
 pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 2, 3) {
         return false;
@@ -106,14 +122,15 @@ pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Co
     let before = next.muscles.len();
     hinge_muscle(&mut next, cfg, first, &template, hip_phase, rng);
     hinge_muscle(&mut next, cfg, first + 1, &template, hip_phase + 0.25, rng);
-    // The extensor: the hip muscle again, attached the other way, half a cycle later.
+    // A second hip muscle: the first again, its anchors mirrored along both
+    // bones, half a cycle on.
     if next.muscles.len() == before + 2 && rng.unit() < 0.5 && room(&next, cfg, 0, 1) {
-        let mut extensor = next.muscles[before];
-        extensor.anchor_a = 1.0 - extensor.anchor_a;
-        extensor.anchor_b = (1.0 - extensor.anchor_b).clamp(0.0, 1.0);
-        extensor.phase = (extensor.phase + 0.5).rem_euclid(1.0);
-        extensor.reset = (extensor.reset + 0.5).rem_euclid(1.0);
-        next.muscles.push(extensor);
+        let mut second_hip = next.muscles[before];
+        second_hip.anchor_a = 1.0 - second_hip.anchor_a;
+        second_hip.anchor_b = (1.0 - second_hip.anchor_b).clamp(0.0, 1.0);
+        second_hip.phase = (second_hip.phase + 0.5).rem_euclid(1.0);
+        second_hip.reset = (second_hip.reset + 0.5).rem_euclid(1.0);
+        next.muscles.push(second_hip);
     }
     if next.muscles.len() == before {
         return false;
@@ -126,12 +143,22 @@ pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Co
     true
 }
 
-/// Copies a leg to the other end of the trunk, to the node nearest the
-/// mirror image of its hip about the middle of the body, so a biped becomes a
-/// quadruped. The copy is translated or reflected, and its muscles run in the
-/// phase of one four-legged gait: half a cycle after the leg (a trot, where
-/// diagonal legs step together), with it (a bound), or a fifth of a cycle off
-/// either way (a gallop).
+/// Copies a leg to the other end of the body, so a biped becomes a quadruped.
+/// The leg has at most three bones, and the body needs room for a node per
+/// bone. The copy hangs from the node whose x is nearest to the mirror image of
+/// the hip about the middle of the body, which is halfway between the lowest
+/// and the highest x of the nodes. Any node can serve but the head, the hip and
+/// the leg's own. The operator does nothing if the hip is within 0.06 of the
+/// body length from the middle, or if that node is within 0.08 of the body
+/// length from the hip in x. The body length counts as at least 0.2 m.
+///
+/// Half the time the copy is the mirror image of the leg, and otherwise it is
+/// translated. Its muscles run at their old phase plus an offset that sets one
+/// four-legged gait. Half a cycle makes a trot, where diagonal legs step
+/// together, and is twice as likely as each other offset. No offset makes a
+/// bound. A fifth of a cycle either way makes a gallop. The idlest tips go for
+/// the added nodes (`shed_tips`), and at most one added node may stay, so the
+/// body ends at most one node bigger.
 pub(crate) fn mirror_leg_fore_aft(
     c: &mut Creature,
     cfg: &Config,
