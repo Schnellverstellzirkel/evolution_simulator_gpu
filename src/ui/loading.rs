@@ -59,6 +59,16 @@ const MESSAGES: &[&str] = &[
 ];
 const MESSAGE_SECONDS: f32 = 4.0;
 
+/// The place in `MESSAGES` of the line for interval number `index`. Interval 0
+/// is the first `MESSAGE_SECONDS` after the card came up. The first line is the
+/// fourth of the list. Each next line is 101 places further on and the count
+/// wraps at the end of the list. 101 is a prime, so it shares no factor with
+/// the length of the list while the list has fewer than 101 lines. Then every
+/// line shows once before any line shows twice.
+fn message_position(index: usize) -> usize {
+    (index * 101 + 3) % MESSAGES.len()
+}
+
 /// Why the window is waiting. `App::loading_screen` in `ui.rs` picks it.
 pub(super) enum Wait<'a> {
     /// The evaluation devices are opening.
@@ -149,10 +159,8 @@ fn body(ui: &mut egui::Ui, theme: Theme, card: &Card, progress: &Progress, clock
     let index = (clock / MESSAGE_SECONDS) as usize;
     let phase = (clock / MESSAGE_SECONDS).fract();
     let alpha = (phase * 6.0).min((1.0 - phase) * 6.0).clamp(0.0, 1.0);
-    // TODO: 7 divides the 42 lines, so the index reaches only 6 of them. A step
-    // that shares no factor with the length of the list would show them all.
     ui.label(
-        RichText::new(MESSAGES[(index * 7 + 3) % MESSAGES.len()])
+        RichText::new(MESSAGES[message_position(index)])
             .size(16.0)
             .italics()
             .color(theme.accent.gamma_multiply(alpha)),
@@ -421,7 +429,17 @@ mod tests {
     #[test]
     fn the_message_index_stays_inside_the_list() {
         for index in 0..10_000usize {
-            assert!(MESSAGES[(index * 7 + 3) % MESSAGES.len()].len() > 10);
+            assert!(MESSAGES[message_position(index)].len() > 10);
+        }
+    }
+
+    #[test]
+    fn every_message_shows_before_any_shows_twice() {
+        let mut shown = vec![false; MESSAGES.len()];
+        for index in 0..MESSAGES.len() {
+            let position = message_position(index);
+            assert!(!shown[position], "line {position} shows twice too soon");
+            shown[position] = true;
         }
     }
 }
