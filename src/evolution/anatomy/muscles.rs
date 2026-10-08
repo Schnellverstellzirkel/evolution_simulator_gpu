@@ -14,9 +14,10 @@ use crate::evolution::{
     Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, Muscles, Rng, bone_point,
 };
 
-/// Adds a muscle between two bones separated by one intermediate bone (for
-/// example trunk to lower leg), timed like an existing muscle on either end:
-/// one contraction moves two joints together.
+/// Adds a muscle between two bones that have exactly one bone between them,
+/// for example the trunk and a lower leg, at random anchors. It copies the
+/// genes of a muscle that has an end on either bone and refits the stroke to
+/// the new span, so one contraction moves two joints together.
 pub(crate) fn add_biarticular_muscle(
     c: &mut Creature,
     cfg: &Config,
@@ -46,9 +47,11 @@ pub(crate) fn add_biarticular_muscle(
     true
 }
 
-/// Moves one end of a muscle to a bone that shares a node with its current
-/// bone, near that shared node, and refits its stroke to the new span. The
-/// muscle then controls a different joint.
+/// Moves one end of a muscle to another bone that shares a node with that end's
+/// bone. The new bone cannot be the muscle's other bone. The new anchor lies
+/// within a quarter of the bone's length of the shared node, and the stroke is
+/// refitted to the new span. The muscle then acts on a different pair of bones.
+/// Ring muscles are not moved.
 pub(crate) fn move_muscle_to_neighbor(
     c: &mut Creature,
     _cfg: &Config,
@@ -96,8 +99,9 @@ pub(crate) fn move_muscle_to_neighbor(
     true
 }
 
-/// Duplicates a muscle; the copy moves one anchor or shifts its phase a
-/// little, so one connection can specialize into two.
+/// Duplicates a muscle. In half of the cases the copy moves one anchor by up to
+/// 0.2 of the bone's length and gets a refitted stroke. Otherwise it shifts its
+/// phase by up to 0.1 of a cycle. One connection can then specialize into two.
 pub(crate) fn split_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.is_empty() || !room(c, cfg, 0, 1) {
         return false;
@@ -119,8 +123,13 @@ pub(crate) fn split_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &
     true
 }
 
-/// Merges two muscles on the same pair of bones with nearby anchors and
-/// similar phase into one with averaged genes.
+/// Merges two muscles on the same pair of bones (in either order) into one,
+/// when each anchor is within 0.25 of the other muscle's and the phases are
+/// within 0.15 of a cycle. The earlier muscle takes the mean of both muscles'
+/// anchors, `short` and `long` lengths, duty and stiffness. Its phase and
+/// touchdown reset move halfway to the other muscle's, the short way round the
+/// cycle. The later muscle is removed. Period, sensor and tendon stay as the
+/// earlier muscle has them.
 pub(crate) fn fuse_similar_muscles(
     c: &mut Creature,
     _cfg: &Config,
@@ -168,16 +177,18 @@ pub(crate) fn fuse_similar_muscles(
     true
 }
 
-/// For a joint whose bones already have a muscle that closes it, adds a
-/// muscle that opens it: from the child bone to a bone on the other side of
-/// the joint (a sibling or the bone beyond), checked geometrically to rotate
-/// the child the other way, with the phase half a cycle from the closer.
+/// For a joint that a muscle (the closer) already closes, adds a muscle that
+/// opens it. The closer joins the child bone of the joint to another bone at
+/// the joint. The opener starts at the same point of the child bone and ends at
+/// the start, middle or end of a bone outside the child's branch. It copies the
+/// closer's other genes, with the stroke refitted and the phase half a cycle
+/// away.
 ///
 /// A muscle between the two bones of a joint can only close it, because its
 /// anchors lie on the bones' center lines. So the opener goes from the child
 /// to a bone outside the child's branch whose attachment point lies on the
-/// other side of the child's line in the pose. Bodies without such a bone
-/// are skipped.
+/// other side of the child's line in the pose. Both muscles must turn the child
+/// by at least `MIN_TORQUE`. Bodies without such a bone are skipped.
 pub(crate) fn add_antagonist(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -219,8 +230,9 @@ pub(crate) fn add_antagonist(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
     true
 }
 
-/// Exchanges the destinations of two muscles: A-B and C-D become A-D and
-/// C-B (skipping pairs that would join a bone to itself), strokes refitted.
+/// Exchanges the destinations of two muscles that share no bone: A-B and C-D
+/// become A-D and C-B. Each keeps its own timing and gets a refitted stroke.
+/// Ring muscles are not swapped.
 pub(crate) fn swap_muscle_routes(
     c: &mut Creature,
     _cfg: &Config,
@@ -262,8 +274,12 @@ pub(crate) fn swap_muscle_routes(
 }
 
 /// Spreads the anchors of several muscles that share a bone and sit close
-/// together evenly along that bone, keeping their timing, so they act at
-/// different leverages.
+/// together evenly along that bone, so they act at different leverages. It
+/// picks a muscle end that has another end within 0.15 of its anchor on the
+/// same bone. That end and the ends within 0.15 of it form a group. In order of
+/// anchor, the end at position `k` of a group of `count` moves to
+/// (k + 0.5) / count. The muscles keep their timing and get strokes refitted to
+/// their new spans.
 pub(crate) fn fan_muscle_attachments(
     c: &mut Creature,
     _cfg: &Config,
@@ -310,8 +326,10 @@ pub(crate) fn fan_muscle_attachments(
     true
 }
 
-/// Replaces a muscle between two bones that are not neighbours with two
-/// muscles through a bone on the path between them, starting in phase.
+/// Replaces a muscle between two bones that are not neighbours (they share no
+/// node) with two muscles that meet at one point of a bone on the path between
+/// them (`path_between`). The second copies the first, so both start in phase.
+/// Ring muscles are not replaced.
 pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -358,6 +376,11 @@ pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &
 /// A limb's pattern is every muscle among its bones and the bone above it.
 /// Bones map by their order in the branch. The recipient loses its own
 /// pattern, except the ring muscles that `repair` would put back.
+///
+/// A limb starts at any bone but the neck. The source needs at least one
+/// muscle, and neither limb may contain the other's first bone. The operator
+/// does nothing when the body would end up with more than `cfg.max_muscles`
+/// muscles.
 pub(crate) fn copy_actuation_to_limb(
     c: &mut Creature,
     cfg: &Config,
@@ -426,11 +449,13 @@ pub(crate) fn copy_actuation_to_limb(
     true
 }
 
-/// Shrinks the strokes of every muscle in a branch by one factor (0.3 to
-/// 0.7), keeping geometry and timing: a limb that fights the gait becomes a
+/// Shrinks the strokes of the muscles that touch one branch by one factor (0.3
+/// to 0.7), keeping geometry and timing: a limb that fights the gait becomes a
 /// quieter support.
 ///
-/// Each muscle keeps its relaxed length (`long`) and contracts less.
+/// Each muscle keeps its relaxed length (`long`) and contracts less. A muscle
+/// counts if it has an end on the branch and a stroke (`long` above `short`).
+/// The branch starts at any bone but the neck, so it is never the whole body.
 pub(crate) fn quiet_muscle_group(
     c: &mut Creature,
     _cfg: &Config,
@@ -568,9 +593,11 @@ mod tests {
     use super::super::{Operator, tests::bodies};
     use super::*;
 
-    /// Runs `op` on test bodies. A change must
-    /// pass `check(before, after)`. No change must leave the body as it was.
-    /// Returns how often the operator applied, out of 160 tries.
+    /// Runs `op` on 80 test bodies with two random streams each. When the
+    /// operator applies, the bones must stay as they were, the muscles must fit
+    /// `cfg.max_muscles` and `check(before, after)` must pass. When it does not
+    /// apply, the body must stay as it was. Returns how often the operator
+    /// applied, out of 160 tries.
     fn each_change(op: Operator, check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
