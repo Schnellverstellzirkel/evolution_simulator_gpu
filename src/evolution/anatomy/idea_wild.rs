@@ -2,13 +2,11 @@
 //! to do all the work, add rubber bands, mute a limb's reflexes, scramble a
 //! limb's timing, and adapt a body to the slope or the hurdles of its world.
 //!
-//! Some of these will lose most of the time. They are cheap to try, each is
-//! a whole change on its own (so its child gets no parameter noise), and the
-//! operators of this file share one pick slot, so a poor one costs little.
-//!
-//! The sources for the ones with one are Herr and Popovic (2008, arms swung
-//! against the legs), Alexander (2003, a leg that is a passive spring) and
-//! Hirose (1993). The rest are experiments.
+//! The operators of this file share one pick slot (`GAIT_FILES` in `mod.rs`),
+//! so a poor one costs little. Each is a whole change on its own, so no
+//! parameter noise follows it. Most are experiments that may lose, and only
+//! `arms_against_legs` names a source (Herr and Popovic 2008, arms swung
+//! against the legs).
 use super::ideas::{by_drive, coin, scale_branch, set, some_leg, wrap};
 use super::limbs::pick;
 use super::rhythm::leaf_limbs;
@@ -36,9 +34,11 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 ];
 
 /// The whole body is reflected about the head's vertical line, with every
-/// joint range reflected too. The physics of the ground is the same both
-/// ways, so a body that walks backward walks forward after this, and a body
-/// that walks forward walks backward: a cheap way to turn around.
+/// joint range reflected too. Apart from effects with a direction, such as a
+/// slope or a wind, the physics is the same both ways, so a body that walks
+/// backward walks forward after this, and a body that walks forward walks
+/// backward: a cheap way to turn around. Does nothing to a body whose nodes all
+/// lie within 3 cm of that line.
 fn mirror_flip_body(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let x0 = c.nodes[0].x;
     if c.nodes.iter().all(|n| (n.x - x0).abs() < 0.03) {
@@ -53,9 +53,10 @@ fn mirror_flip_body(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Conte
     true
 }
 
-/// The joints of one leg (or of the whole body) bend the other way: each
-/// range is negated, so a knee that bent forward bends back. A body with its
-/// nodes where they were stands the same and moves differently.
+/// The joints of one leg bend the other way, or, half the time, those of every
+/// bone but the neck: each range (min, max) becomes (-max, -min), so a knee that
+/// bent forward bends back. A body with its nodes where they were stands the
+/// same and moves differently.
 fn flip_joint_ranges(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let bones: BoneIds = match some_leg(c, rng, 1, false) {
         Some(leg) if coin(rng) => leg,
@@ -71,8 +72,10 @@ fn flip_joint_ranges(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     changed
 }
 
-/// Shifts the nodes above the median height sideways in proportion to their
-/// height above it: a lean of the upper body.
+/// Shifts every node above the median height along x, by `by` times its height
+/// above the median (forward when `by` is positive): a lean of the upper body.
+/// The head is left out of both the median and the shift, and a body with fewer
+/// than 3 nodes besides the head is left alone. Returns whether any node moved.
 fn lean(c: &mut Creature, by: f32) -> bool {
     let mut ys: Vec<f32> = (1..c.nodes.len()).map(|n| c.nodes[n].y).collect();
     if ys.len() < 3 {
@@ -89,14 +92,17 @@ fn lean(c: &mut Creature, by: f32) -> bool {
     changed
 }
 
-/// The upper body leans forward or back by 0.15 to 0.4 of its height.
+/// The upper body leans forward or back: each node above the median height
+/// shifts by 0.15 to 0.4 of its height above it.
 fn lean_trunk(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let by = rng.range(0.15, 0.4) * if coin(rng) { 1.0 } else { -1.0 };
     lean(c, by)
 }
 
-/// On a slope the upper body leans into the hill: forward when the ground
-/// rises ahead, back when it falls. Only in a sloped world.
+/// On a slope the upper body leans into the hill, each node shifting by 0.15 to
+/// 0.35 of its height above the median: forward when the ground rises ahead,
+/// back when it falls. Does nothing when `Config::slope` (rise over run) is
+/// within 0.01 of zero.
 fn slope_lean(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if cfg.slope.abs() < 0.01 {
         return false;
@@ -104,7 +110,8 @@ fn slope_lean(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
     lean(c, rng.range(0.15, 0.35) * cfg.slope.signum())
 }
 
-/// One leg's muscles each take a random phase: a limb gone out of step.
+/// One leg that has a muscle is picked, and every muscle with an end on it takes
+/// a random phase: a limb gone out of step.
 fn limb_roulette(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
@@ -116,8 +123,9 @@ fn limb_roulette(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// Up to three muscles join random pairs of bones, each with a random program
-/// of its own.
+/// Up to three muscles join random pairs of bones. Each joins two different
+/// bones that no muscle joins yet, at random anchors, and has a random rhythm of
+/// its own. A body with fewer than 3 bones is left alone.
 fn muscle_confetti(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let bones = c.bones.len();
     if bones < 3 || !room(c, cfg, 0, 1) {
@@ -145,9 +153,10 @@ fn muscle_confetti(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context)
     added > 0
 }
 
-/// One leg keeps its drive; the muscles of every other leg go slack, a weak
-/// spring each, so the others trail as passive struts (like a scooter's
-/// foot on the ground).
+/// One leg that has a muscle keeps its drive. Every muscle with an end on
+/// another leg and none on that one goes slack, a weak spring each (a stiffness
+/// of 1 and a tendon of 0.8), so the others trail as passive struts, like a
+/// scooter's foot on the ground. Does nothing with fewer than two legs.
 fn scooter_mode(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
     if legs.len() < 2 {
@@ -170,8 +179,10 @@ fn scooter_mode(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -
     changed
 }
 
-/// Limbs whose root sits above the median height (arms) run half a cycle
-/// after the others (legs), swinging against them (Herr and Popovic 2008).
+/// Every muscle with an end on a limb whose root sits above the median root
+/// height (an arm) starts half a cycle later, so an arm that swung with the legs
+/// now swings against them (Herr and Popovic 2008). A muscle with an end on two
+/// arms moves once. Does nothing with fewer than two limbs.
 fn arms_against_legs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let limbs = leaf_limbs(c);
     if limbs.len() < 2 {
@@ -195,9 +206,10 @@ fn arms_against_legs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Cont
     changed
 }
 
-/// In a world with hurdles, legs shorter than 2.5 times the hurdle's height
-/// grow toward that length (at most 1.4 times): a leg that cannot clear a
-/// step is no use. Only in a world with hurdles.
+/// Each leg shorter than 2.5 times the hurdle height grows toward that length,
+/// by at most 1.4 times and within the bone limits (`scale_branch`): a leg that
+/// cannot clear a step is no use. A leg's length is the sum of its bone lengths.
+/// Does nothing when the hurdle height (`Config::hurdles`) is under 0.01 m.
 fn hurdle_legs(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if cfg.hurdles < 0.01 {
         return false;
@@ -214,7 +226,8 @@ fn hurdle_legs(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) ->
 }
 
 /// Every muscle gets a tendon of at least 0.8, a duty of a quarter and the
-/// median period, and the whole body takes one phase: a pogo stick.
+/// median period, and the whole body takes the phase of the first muscle: a
+/// pogo stick.
 fn pogo_everything(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.is_empty() {
         return false;
@@ -234,8 +247,9 @@ fn pogo_everything(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Contex
     changed
 }
 
-/// Up to three rubber bands: passive muscles with a full tendon across
-/// neighbouring bones that have none between them.
+/// Up to three rubber bands: passive muscles (a stiffness of 1) with the
+/// stiffest tendon, each anchored at the middle of two bones that share a node
+/// and have no muscle between them. A band has the rhythm of a random muscle.
 fn elastic_bands(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.is_empty() || !room(c, cfg, 0, 1) {
         return false;
@@ -268,8 +282,8 @@ fn elastic_bands(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -
     added > 0
 }
 
-/// The strongest muscle gives its duty and its tendon to every muscle that
-/// shares a bone with it.
+/// The strongest muscle (by `drive`, stiffness times stroke) gives its duty and
+/// its tendon to every muscle that shares a bone with it.
 fn follow_the_strongest(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 2 {
         return false;
@@ -306,8 +320,9 @@ fn equal_strength(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// Touchdown sensors move to the other end of their bone: a foot that sensed
-/// its landing at the toe senses it at the heel.
+/// Touchdown sensors move to the other end of their bone (a `sensor` of 0 and 1
+/// swap, as do 2 and 3): a foot that sensed its landing at the toe senses it at
+/// the heel.
 fn sense_other_end(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let mut changed = false;
     for m in &mut c.muscles {
@@ -319,7 +334,8 @@ fn sense_other_end(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Contex
     changed
 }
 
-/// One leg's muscles lose their touchdown sensors and run open-loop.
+/// One leg that has a sensing muscle is picked, and every muscle with an end on
+/// it loses its touchdown sensor and runs open-loop.
 fn numb_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let sensing: Vec<BoneIds> = leaf_limbs(c)
         .iter()
