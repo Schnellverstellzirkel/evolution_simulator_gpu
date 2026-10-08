@@ -41,7 +41,7 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 ## Cost
 
-One thread per creature keeps each creature's nodes, bones and muscle state in the thread's local memory, about 4 KB. The kernel is bound by the L1 cache, so it takes all of a multiprocessor's memory as L1 cache (the default of `EVOLUTION_WARP_CARVEOUT`, 0) and is built for 3 blocks of 128 threads per multiprocessor. On 40,000 creatures of a generation-40 save, in full trials, it ran 5.97M creature-steps per second at 3 blocks against 5.67M at 4.
+One thread per creature keeps each creature's constants, bones and muscle energy in the thread's local memory, about 3.5 KB. The node positions, velocities and muscle forces of a body of 16 nodes or fewer are in shared memory, 48 KB per block, so the kernel runs two blocks of 128 threads per multiprocessor (the default of `EVOLUTION_WARP_CARVEOUT`, 100). A larger body keeps them in local memory too. The kernel was bound by the L1 cache: its request path was 95% busy and 88% of the warp stalls were on local and global loads, because the local lines of all resident warps do not fit in L1 and every store goes through to L2. On 224,695 evolved creatures in 3 s trials it ran 3.71M creature-steps per second with all state in local memory and 5.9M with the shared tables. Per GPU-busy second, 40,000 bodies of 17 to 32 nodes run at about 1M creature-steps (the old path) against 13M for bodies of 16 nodes or fewer.
 
 Most of the time goes to the muscles. Computing their forces once per step instead of once per substep made the kernel 2.7 times faster, but then only 88% of the top elites kept their distance at the confirmation trial, against 95% to 99%, so the forces stay per substep.
 

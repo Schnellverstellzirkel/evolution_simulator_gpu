@@ -34,8 +34,9 @@ creatures through CUDA and nowhere else (`src/cuda_engine.rs`,
 through Vulkan (wgpu), on the GPU the desktop uses.
 `EVOLUTION_CUDA_VERBOSE=1` prints each kernel's registers, shared and local
 memory and occupancy as it loads. `EVOLUTION_WARP_CARVEOUT=<percent>` sets the
-shared-memory share of each multiprocessor's memory (0, the default, leaves it
-all to the L1 cache).
+shared-memory share of each multiprocessor's memory (100, the default, fits two
+blocks of the kernel's 48 KB of shared memory, and 0 fits one block and leaves
+the rest to the L1 cache).
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
 or the GPU is not an NVIDIA GPU, the game stops with an error that says so.

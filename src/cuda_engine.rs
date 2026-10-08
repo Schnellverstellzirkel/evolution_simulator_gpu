@@ -932,12 +932,13 @@ fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> R
             (cu.module_unload)(module);
             return Err(error);
         }
-        // The kernel uses no shared memory and keeps each creature in local
-        // memory, so the multiprocessor's memory goes to the L1 cache: the
-        // preferred shared memory carveout
-        // (CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, percent) is 0.
-        // A developer can set it with `EVOLUTION_WARP_CARVEOUT`.
-        let carveout = crate::kernel::solver_setting("CARVEOUT", 0) as c_int;
+        // The kernel keeps the node state of a body of 16 nodes or fewer in
+        // 48 KB of shared memory per block. With the preferred shared memory
+        // carveout (CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+        // percent) at 0 the driver gives the multiprocessor just enough for
+        // one block, and at 100 it fits two. A developer can set it with
+        // `EVOLUTION_WARP_CARVEOUT`.
+        let carveout = crate::kernel::solver_setting("CARVEOUT", 100) as c_int;
         cu.check(
             (cu.func_set_attribute)(function, 9, carveout),
             "cuFuncSetAttribute",
