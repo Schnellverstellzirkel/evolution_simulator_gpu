@@ -280,9 +280,13 @@ pub(crate) fn spread_leg_attachment(
     true
 }
 
-/// Turns a leg so its first bone points down, within a small lean, and its
-/// feet end up under its hip: a leg that holds the trunk up, not a lever that
-/// pushes sideways. Only legs that point 0.1 to 1.3 rad off straight down turn.
+/// Turns a randomly picked leg about its hip so that its first bone points
+/// down, within 0.15 rad of straight down. The aim is a leg that holds the
+/// trunk up instead of a lever that pushes sideways. The whole leg turns, and
+/// the body is lifted if a node would end below the ground. The leg turns only
+/// if the turn is between 0.1 and 1.3 rad. A leg that already points about down
+/// and a leg that is more than about 1.3 rad off down stay as they are. Muscle
+/// strokes are scaled by the change in the muscle's span (`keep_strokes`).
 pub(crate) fn tuck_leg_under(
     c: &mut Creature,
     _cfg: &Config,
@@ -290,12 +294,14 @@ pub(crate) fn tuck_leg_under(
     _cx: &Context,
 ) -> bool {
     let children = child_bones(c);
-    let legs: BoneIds = leaf_limbs(c)
+    // The filter keeps every leg. A leaf limb never starts with the neck, and
+    // its first bone is one of the child bones of its own hip.
+    let roots: BoneIds = leaf_limbs(c)
         .iter()
         .map(|limb| limb[0])
         .filter(|&b| !is_neck(c, b) && !children[c.bones[b].a as usize].is_empty())
         .collect();
-    let Some(&root) = legs.get(rng.index(legs.len().max(1))) else {
+    let Some(&root) = roots.get(rng.index(roots.len().max(1))) else {
         return false;
     };
     let (a, b) = (
