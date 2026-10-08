@@ -1,13 +1,15 @@
-//! Leg operators. They make the parts of a mammal-like gait cheap to reach by
+//! Leg operators make the parts of a mammal-like gait easy to reach by
 //! mutation: legs that hang under the trunk, come in front and back pairs,
-//! spread along the trunk, and step in a fixed phase against each other.
+//! spread along the trunk and step in a fixed phase against each other. A leg
+//! is a leaf limb (`leaf_limbs` in `rhythm.rs`) and the trunk is every node in
+//! no leg.
 //!
-//! The sources are Sims (1994, limbs added in pairs with mirrored timing),
-//! Lipson and Pollack (2000, legs as repeated rigid bars with actuators at the
-//! hinges), Cheney et al. (2013, regular and symmetric bodies move further)
-//! and Stanley (2007, regularity from repetition and symmetry). Like the other
-//! compound operators, each is a whole change, and the ones that add nodes
-//! give the idlest tips back.
+//! Like the other compound operators (`COMPOUND` in `mod.rs`), each is a whole
+//! change, and the two that add nodes give the idlest tips back (`shed_tips` in
+//! `compound.rs`). The sources are Sims (1994, limbs added in pairs with
+//! mirrored timing), Lipson and Pollack (2000, legs as repeated rigid bars with
+//! actuators at the hinges), Cheney et al. (2013, regular and symmetric bodies
+//! move further) and Stanley (2007, regularity from repetition and symmetry).
 use super::compound::{close_ring, hinge_muscle, lead_muscle, limb_phase, shed_tips, strongest};
 use super::junctions::{add_node, keep_strokes, spans, turn_branch};
 use super::limbs::clamped;
