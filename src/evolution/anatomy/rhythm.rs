@@ -17,12 +17,13 @@ use crate::evolution::{
 };
 use crate::qd::gaussian;
 
-/// Moves joint range from one joint to a neighbour: a bone and the bone above
-/// it or a bone below it, neither of them the neck. The first joint narrows
-/// and the second widens by the same angle, so the two ranges keep their total
-/// width. The angle is 20 to 80% of the most that can move, which is the
-/// smaller of the narrowed joint's width and the widened joint's room up to
-/// `JOINT_LIMIT`. It returns false when no pair has more than 0.01 rad to move.
+/// Moves joint range from one joint to a neighbouring joint. The neighbour is
+/// the bone above or a bone below, and neither bone is the neck. The first
+/// joint narrows and the second widens by the same angle, so the two ranges
+/// keep their total width. The angle is 20 to 80% of the most that can move,
+/// which is the smaller of the narrowed joint's width and the widened joint's
+/// room up to `JOINT_LIMIT`. It returns false when no pair has more than 0.01
+/// rad to move.
 pub(crate) fn redistribute_joint_flex(
     c: &mut Creature,
     _cfg: &Config,
@@ -30,10 +31,11 @@ pub(crate) fn redistribute_joint_flex(
     _cx: &Context,
 ) -> bool {
     let width = |b: &Bone| b.max_angle - b.min_angle;
-    // A bone and the bone above or below it, as (narrowed, widened), with the
-    // most angle that can move. The neck's joint is free, so it takes no part.
-    // A bone has one bone above it and its children below: at most two pairs
-    // per bone.
+    // A bone and the bone above or below it, as (narrowed, widened, most angle
+    // that can move). The neck's range limits nothing, so it takes no part.
+    // Each bone has one bone above it, and each such link gives two pairs, one
+    // for each bone as the narrowed one. So there are at most two pairs per
+    // bone.
     let mut pairs: Bounded<(usize, usize, f32), { 2 * MAX_NODES }> = Bounded::new();
     for from in 0..c.bones.len() {
         for to in 0..c.bones.len() {
@@ -50,7 +52,9 @@ pub(crate) fn redistribute_joint_flex(
     let (from, to, most) = pairs[rng.index(pairs.len())];
     let angle = most * rng.range(0.2, 0.8);
     // The narrowed joint keeps the ratio of its two sides. The widened joint
-    // grows each side in proportion to its room up to `JOINT_LIMIT`.
+    // grows each side by the same share of its room up to `JOINT_LIMIT`. Here
+    // `below` is the room under its lower limit and `above` the room over its
+    // upper limit.
     let x = &mut c.bones[from];
     let scale = 1.0 - angle / width(x);
     x.min_angle *= scale;
@@ -68,11 +72,11 @@ pub(crate) fn redistribute_joint_flex(
 /// the same change to both. The change is one of three, with equal odds. It
 /// scales both lengths by `exp(0.15 * g)`. Or it moves both joint ranges, the
 /// lower limit by `0.15 * g` and the upper limit by another `0.15 * g`. Or it
-/// moves every muscle end on either bone along the bone by `0.1 * g`. Each
-/// `g` is a new gaussian draw, and lengths, ranges and anchors stay within
-/// their limits. Muscle timing is untouched, so the pair keeps its timing
-/// difference. It returns false when there is no pair, or when the limits
-/// leave both bones as they were.
+/// moves every muscle end on either bone along the bone by `0.1 * g` of its
+/// length. Each `g` is a new gaussian draw, and lengths, ranges and anchors
+/// stay within their limits. Muscle timing is untouched, so the pair keeps its
+/// timing difference. It returns false when there is no pair, or when the
+/// change moves nothing.
 pub(crate) fn mutate_matching_limbs(
     c: &mut Creature,
     _cfg: &Config,
@@ -127,7 +131,8 @@ pub(crate) fn mutate_matching_limbs(
 /// Pairs of matching branches (`matching_limbs`): the branches, and the pairs
 /// as indices into them.
 pub(super) struct LimbPairs {
-    /// The branch below each bone but the neck, in bone order (`branch`).
+    /// The branch that starts with each bone but the neck, in bone order
+    /// (`branch`).
     pub limbs: Limbs,
     /// Each pair as two indices into `limbs`, the lower index first. The pairs
     /// run in order of the first index, then the second.
@@ -167,8 +172,9 @@ impl IntoIterator for LimbPairs {
 /// Finds the pairs of branches that match. The two branches of a pair share no
 /// bone and have the same bone count. Taken in `branch` order, their bones are
 /// of similar length: at each position the longer is at most 1.25 times the
-/// shorter. The trees may still differ in shape. Every branch below a bone but
-/// the neck is a candidate, so a pair can be two legs or two larger branches.
+/// shorter. The trees may still differ in shape. Every branch that starts with
+/// a bone but the neck is a candidate, so a pair can be two legs or two larger
+/// branches.
 pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
     let children = child_bones(c);
     let limbs: Limbs = (0..c.bones.len())
@@ -212,8 +218,10 @@ pub(crate) fn chain_phase_wave(
     phase_wave(c, &chain, step)
 }
 
-/// A path of at least two bones from a random bone (not the neck) down to a
-/// foot, taking a random child bone at each junction.
+/// A path from a random bone that is not the neck and has a bone below it,
+/// down to a bone with none below it. It takes a random child bone at each
+/// junction, and it has at least two bones. It is `None` when no bone can start
+/// such a path.
 fn chain_below(c: &Creature, rng: &mut Rng) -> Option<BoneIds> {
     let children = child_bones(c);
     let starts: BoneIds = (0..c.bones.len())
@@ -233,7 +241,9 @@ fn chain_below(c: &Creature, rng: &mut Rng) -> Option<BoneIds> {
 }
 
 /// Sets every muscle on `chain[i]` to the phase of the chain's first muscle
-/// plus `i` steps. A muscle on two chain bones counts for the upper one.
+/// plus `i` steps of `step` cycles. The first muscle is the first one found
+/// from the top bone down. A muscle on two chain bones counts for the upper
+/// one. It returns false when no muscle is on the chain.
 fn phase_wave(c: &mut Creature, chain: &[usize], step: f32) -> bool {
     let parts: Limbs = chain.iter().map(|&b| BoneIds::from_slice(&[b])).collect();
     let groups = muscle_groups(c, &parts);
@@ -352,9 +362,13 @@ pub(super) fn organ_bones(c: &Creature) -> BoneIds {
         .collect()
 }
 
-/// Shifts the muscles of each limb together so that the first muscle of limb
-/// `i` sits at the first limb's phase plus the pattern's offset for `i`:
-/// 0 all together, 1 alternating halves, 2 evenly staggered.
+/// Shifts the muscles of each limb by one common amount, so that the first
+/// muscle of limb `i` lands on the phase of the first muscle of the first limb
+/// that has one, plus an offset for `i`. Pattern 0 has offset 0 (all together).
+/// Pattern 1 has 0.5 when `i` is odd and 0 when it is even (alternating
+/// halves). Any other pattern has `i / limbs.len()` of a cycle (evenly
+/// staggered). A muscle on two limbs moves with the earlier one. It returns
+/// false when no limb has a muscle.
 fn shift_limbs(c: &mut Creature, limbs: &[BoneIds], pattern: usize) -> bool {
     let groups = muscle_groups(c, limbs);
     let Some(&first) = groups.iter().flatten().next() else {
@@ -395,10 +409,11 @@ pub(super) fn muscle_groups(c: &Creature, parts: &[BoneIds]) -> Bounded<MuscleId
 
 /// Changes the duty of every muscle in a limb by one amount and moves their
 /// phases so each contraction keeps its middle: a slower contraction with a
-/// quicker release, or the reverse. The limb is the branch below a random bone
-/// other than the neck, and a muscle counts if either of its ends is on it.
-/// The amount is 0.03 to 0.2 of a cycle, up or down with equal odds, and each
-/// duty stays within 0.05 and 0.95. It returns false when no duty changes.
+/// quicker release, or the reverse. The limb is the branch that starts with a
+/// random bone other than the neck, and a muscle counts if either of its ends
+/// is on it. The amount is 0.03 to 0.2 of a cycle, up or down with equal odds,
+/// and each duty stays within 0.05 and 0.95. It returns false when no duty
+/// changes.
 pub(crate) fn limb_duty_cycle(
     c: &mut Creature,
     _cfg: &Config,
@@ -412,8 +427,10 @@ pub(crate) fn limb_duty_cycle(
     let limb = branch(c, roots[rng.index(roots.len())]);
     let amount = rng.range(0.03, 0.2) * if rng.unit() < 0.5 { -1.0 } else { 1.0 };
     let mut changed = false;
-    // A muscle contracts while its cycle position is below `duty`, so the
-    // middle of the contraction comes at cycle position `duty / 2`.
+    // A muscle contracts while its cycle position is below `duty`, and the
+    // cycle position is the time in periods plus `phase`. So the middle of the
+    // contraction comes when the time is `duty / 2` minus `phase`, and `phase`
+    // moves by half the change in duty to keep that time.
     for i in muscles_on(c, &limb, false) {
         let m = &mut c.muscles[i];
         let duty = (m.duty + amount).clamp(0.05, 0.95);
@@ -485,7 +502,8 @@ pub(crate) fn redistribute_organ_mass(
     let from = organs[rng.index(organs.len())];
     // The source keeps at least the lightest organ, and a new organ starts
     // with at least that much. Each target comes with the least and most mass
-    // it can take.
+    // it can take. It counts only when the most is over 0.001 kg above the
+    // least.
     let spare = c.bones[from].organ_mass - MIN_ORGAN_MASS;
     let center = organ_center(&c.nodes);
     let targets: Bounded<(usize, f32, f32), MAX_NODES> = (0..c.bones.len())
@@ -607,7 +625,9 @@ mod tests {
                 both += 1;
             }
         }
-        // Clamping can hide the change on one of the two limbs, but rarely.
+        // A limit, or a bone with no muscle end in an anchor change, can leave
+        // one of the two bones as it was. So only half of the results must
+        // change both.
         assert!(both * 2 >= results.len(), "{both} of {}", results.len());
     }
 
