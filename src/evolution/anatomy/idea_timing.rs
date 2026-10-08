@@ -59,9 +59,10 @@ fn neighbours(c: &Creature, x: usize, y: usize) -> bool {
     p.bone_a == q.bone_a || p.bone_a == q.bone_b || p.bone_b == q.bone_a || p.bone_b == q.bone_b
 }
 
-/// Moves each muscle's phase by `pull` of the way to the circular mean of the
-/// muscles it shares a bone with (a negative `pull` moves it away). All
-/// phases are read before any is written.
+/// Moves each muscle's phase `pull` of the shortest way round the cycle to the
+/// circular mean of the phases of the muscles it shares a bone with. A
+/// negative `pull` moves it away. A muscle stays if it has no such neighbour
+/// or their phases cancel out. All phases are read before any is written.
 fn couple(c: &mut Creature, pull: f32) -> bool {
     let before: Vec<f32> = c.muscles.iter().map(|m| m.phase).collect();
     let mut changed = false;
@@ -91,7 +92,8 @@ fn kuramoto_push(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context)
 }
 
 /// Muscles in order take phases a golden-ratio step apart (Weyl 1916), which
-/// spreads any number of muscles evenly round the cycle.
+/// spreads any number of muscles evenly round the cycle. The first muscle keeps
+/// its phase, and the steps go forward or backward round the cycle.
 fn golden_phases(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 2 {
         return false;
@@ -105,9 +107,10 @@ fn golden_phases(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// Moves the muscles of each limb together so the first muscle of limb `i`
-/// sits at the first limb's phase plus `offset(i)`. A muscle on two limbs
-/// moves once.
+/// Moves the muscles of each limb together, so that the first muscle of limb
+/// `i` sits `offset(i)` cycles after the first muscle of the first limb that
+/// has one, as it was before the move. A muscle on two limbs moves once, with
+/// the first of them, so it may miss the offset of the other.
 fn offset_limbs(c: &mut Creature, limbs: &[BoneIds], offset: impl Fn(usize) -> f32) -> bool {
     let Some(lead) = limbs
         .iter()
@@ -134,7 +137,7 @@ fn offset_limbs(c: &mut Creature, limbs: &[BoneIds], offset: impl Fn(usize) -> f
 }
 
 /// Three or more legs run in three phases, a third of a cycle apart, in
-/// order (a three-beat canter or a tripod rotation).
+/// order and in either direction: a three-beat step like a canter.
 fn three_phase_split(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
     if legs.len() < 3 {
@@ -171,6 +174,7 @@ fn traveling_wave_by_distance(
         return false;
     }
     let cycles = rng.range(0.3, 1.0) * if coin(rng) { 1.0 } else { -1.0 };
+    // Chosen so that the first muscle keeps its phase.
     let base = c.muscles[0].phase - cycles * far[0] / longest;
     let mut changed = false;
     for (m, d) in far.iter().enumerate() {
@@ -215,7 +219,7 @@ fn time_reverse_body(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Cont
 }
 
 /// One muscle's period changes by 1 to 4%, so it drifts against the others
-/// and the gait beats instead of repeating at once.
+/// and the gait beats instead of repeating every cycle.
 fn detune_one(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let ids: Vec<usize> = (0..c.muscles.len()).collect();
     let Some(m) = pick(&ids, rng) else {
@@ -240,8 +244,9 @@ fn tempo_shift(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) ->
     changed
 }
 
-/// Legs in order run at a period divided by 1, 2, 3, 1, 2, 3 and so on: a
-/// ladder of harmonics, every leg a whole number of beats to the cycle.
+/// Legs in order run at the longest muscle period of the body divided by 1, 2,
+/// 3, 1, 2, 3 and so on: a ladder of harmonics, so every leg beats a whole
+/// number of times in that period.
 fn harmonic_ladder(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
     if legs.len() < 2 {
@@ -274,7 +279,8 @@ fn duty_golden(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) ->
 
 /// One limb of a matching pair works for the share of the cycle that the other
 /// rests, starting when it stops: one limb pushes while the other swings, with
-/// no overlap and no gap.
+/// no overlap and no gap. The muscles of the two limbs pair up in order, and
+/// each muscle of the second limb takes the period of its partner.
 fn duty_complement_pair(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let pairs = matching_limbs(c);
     if pairs.is_empty() {
@@ -294,13 +300,15 @@ fn duty_complement_pair(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Co
             &mut changed,
         );
         set(&mut c.muscles[q].phase, wrap(phase + duty), &mut changed);
+        // Copied without `set`, so a new period alone is not reported as a change.
         c.muscles[q].period = c.muscles[p].period;
     }
     changed
 }
 
-/// Every phase snaps to the nearest step: eighth or sixth of a cycle (chosen
-/// randomly), which tidies a gait whose phases drifted into a near-pattern.
+/// Every phase snaps to the nearest eighth of a cycle, or to the nearest sixth
+/// (one of the two, chosen at random). This tidies a gait whose phases drifted
+/// close to a pattern.
 fn phase_quantize(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let steps = if coin(rng) { 8.0 } else { 6.0 };
     let mut changed = false;
@@ -327,8 +335,10 @@ fn swap_two_phases(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// A muscle with a touchdown sensor jumps 15 to 35% of a cycle ahead of its
-/// own phase when the foot lands, so each landing advances the gait.
+/// Every muscle with a touchdown sensor gets a reset position equal to its own
+/// phase plus one shift of 15 to 35% of a cycle. The shift is the same for all
+/// of them. Each time its foot lands, the muscle's cycle jumps to its reset
+/// position.
 fn reset_advance(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let ahead = rng.range(0.15, 0.35);
     let mut changed = false;
@@ -340,9 +350,10 @@ fn reset_advance(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// The strongest muscle leads. The others follow it in order of strength, each
-/// a share of the cycle after the one before, so the gait runs as a wave
-/// from the muscle that does the most.
+/// The strongest muscle (by `by_drive`) leads and keeps its phase. The others
+/// follow it in order of strength, each one step after the one before, so the
+/// gait runs as a wave from the muscle that does the most. The step is a random
+/// 0.5 to 1 cycle divided by the number of muscles.
 fn conductor(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 3 {
         return false;
@@ -362,9 +373,9 @@ fn conductor(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
     changed
 }
 
-/// The muscles in the rear half of the body (by position along it) run half
-/// a cycle after those in the front half: a body that works in two halves
-/// against each other.
+/// The muscles whose midpoints lie in the rear half of the body (below the
+/// median x) run half a cycle after those in the front half: a body that works
+/// in two halves against each other.
 fn halves_antiphase(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 2 {
         return false;
@@ -385,8 +396,9 @@ fn halves_antiphase(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Conte
     changed
 }
 
-/// Phase follows height: higher muscles fire later (or earlier) by up to a
-/// half cycle, a wave that rises through the body.
+/// Phase follows height: from the lowest muscle to the highest it changes by
+/// 0.2 to 0.5 of a cycle, in either direction. This is a wave that rises
+/// through the body.
 fn phase_from_height(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 2 {
         return false;
@@ -401,6 +413,7 @@ fn phase_from_height(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
         return false;
     }
     let cycles = rng.range(0.2, 0.5) * if coin(rng) { 1.0 } else { -1.0 };
+    // Chosen so that the first muscle keeps its phase.
     let base = c.muscles[0].phase - cycles * (ys[0] - low) / (high - low);
     let mut changed = false;
     for (m, y) in ys.iter().enumerate() {
