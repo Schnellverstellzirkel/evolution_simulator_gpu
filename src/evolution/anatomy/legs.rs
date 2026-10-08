@@ -332,6 +332,10 @@ mod tests {
     use super::*;
     use crate::evolution::repair;
 
+    /// Applies `op` to 160 test bodies. A body it changes must stay within the
+    /// node and muscle limits, pass `check` (given the body before and after)
+    /// and go through `repair`. A body it refuses must come back unchanged.
+    /// Returns how many it changed.
     fn run(op: Operator, check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
@@ -382,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn tuck_leg_under_keeps_the_shape() {
+    fn tuck_leg_under_keeps_the_bone_and_muscle_counts() {
         let n = run(tuck_leg_under, |before, after| {
             assert_eq!(after.bones.len(), before.bones.len());
             assert_eq!(after.muscles.len(), before.muscles.len());
