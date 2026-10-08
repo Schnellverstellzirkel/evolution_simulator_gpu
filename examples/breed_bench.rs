@@ -17,7 +17,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use evolution_simulator::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, Population},
+    evolution::{self, CandidatePlan, Creature, Population, StoredCreature},
     qd::{self, Emitter, EvaluationMetrics, TrialMetrics},
     storage::{self, Experiment},
 };
@@ -314,6 +314,15 @@ fn elite_sizes(e: &Experiment) -> (usize, f64, f64) {
     )
 }
 
+/// The bytes a `StoredCreature` holds: the struct and its one allocation of
+/// genes, without the allocator's own overhead.
+fn stored_bytes(c: &StoredCreature) -> usize {
+    std::mem::size_of::<StoredCreature>()
+        + c.node_count() * std::mem::size_of::<evolution::NodeGene>()
+        + c.bone_count() * std::mem::size_of::<evolution::Bone>()
+        + c.muscle_count() * std::mem::size_of::<evolution::Muscle>()
+}
+
 // ---- measurement ---------------------------------------------------------
 
 /// The number of structural operators: the classic ones and the anatomy ones.
@@ -599,9 +608,9 @@ fn main() -> Result<()> {
         start.ring_len()
     );
     // The creatures the experiment holds: elites, lineage records and CMA
-    // templates. The size counts each one as a full `Creature`, which has
-    // inline arrays. Elites and lineage records are stored smaller than that
-    // (`StoredCreature`), so the size is an upper bound.
+    // templates. An elite and a lineage record are a `StoredCreature`, which
+    // holds exactly its genes. A CMA template is a whole `Creature`, which has
+    // inline arrays, so it counts at that size.
     let stored = [
         (
             "island",
@@ -612,15 +621,28 @@ fn main() -> Result<()> {
         ("CMA templates", start.cma_emitters.len()),
     ];
     let count: usize = stored.iter().map(|s| s.1).sum();
+    let bytes = start
+        .islands
+        .iter()
+        .flat_map(|a| &a.entries)
+        .chain(&start.archive.entries)
+        .map(|e| stored_bytes(&e.creature))
+        .sum::<usize>()
+        + start
+            .lineage
+            .values()
+            .map(|a| stored_bytes(&a.creature))
+            .sum::<usize>()
+        + start.cma_emitters.len() * std::mem::size_of::<Creature>();
     println!(
-        "stored creatures: {} = {count}, {:.0} MB at {} B each",
+        "stored creatures: {} = {count}, {:.0} MB at {:.0} B each on average",
         stored
             .iter()
             .map(|(name, n)| format!("{n} {name}"))
             .collect::<Vec<_>>()
             .join(" + "),
-        (count * std::mem::size_of::<Creature>()) as f64 / 1e6,
-        std::mem::size_of::<Creature>()
+        bytes as f64 / 1e6,
+        bytes as f64 / count.max(1) as f64
     );
     // Timing: plan each block, then breed it child by child on the pool.
     // Planning changes the experiment, so it plans on a copy and `start` stays
