@@ -801,7 +801,9 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     s.arrow((510.0, 330.0), (472.0, 330.0), RED);
     s.arrow((510.0, 560.0), (472.0, 560.0), RED);
     s.badge(40.0, 98.0, 1);
-    let next = until_migration(generation);
+    // The hub gets its copies as the counter is raised at the end of this
+    // generation, so the countdown asks about the counter's next value.
+    let next = until_migration(generation + 1);
     let when = if next == 0 {
         "The boats sail after this generation".to_owned()
     } else {
