@@ -1,4 +1,10 @@
-//! Operators that change joint ranges, timing patterns and mass together.
+//! The seven operators here retune a body and add or remove no bone and no
+//! muscle. They trade joint range between neighbours, change two matching
+//! limbs alike, shift the phases and duty of a limb's muscles, tie a foot's
+//! touchdown to its muscles and move organ mass between bones. `BASE_OPERATORS`
+//! in `anatomy/mod.rs` lists them, and each has a pick slot of its own. The
+//! limb finders that the other operator files share are here too, such as
+//! `leaf_limbs` and `matching_limbs`.
 use super::muscles::shift_phase;
 use super::{
     BoneIds, Children, Context, Limbs, MuscleIds, branch, branch_in, child_bones, degree, is_neck,
@@ -107,24 +113,30 @@ pub(crate) fn mutate_matching_limbs(
     changed
 }
 
-/// Pairs of branches of the same shape (`matching_limbs`): the branches, and
-/// the pairs as indices into them.
+/// Pairs of matching branches (`matching_limbs`): the branches, and the pairs
+/// as indices into them.
 pub(super) struct LimbPairs {
+    /// The branch below each bone but the neck, in bone order (`branch`).
     pub limbs: Limbs,
+    /// Each pair as two indices into `limbs`, the lower index first. The pairs
+    /// run in order of the first index, then the second.
     pub pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES / 2 }>,
 }
 impl LimbPairs {
+    /// The number of pairs.
     pub fn len(&self) -> usize {
         self.pairs.len()
     }
+    /// Whether there is no pair.
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
     }
-    /// Pair `k`, in order.
+    /// The two branches of pair `k`.
     pub fn get(&self, k: usize) -> (&BoneIds, &BoneIds) {
         let (x, y) = self.pairs[k];
         (&self.limbs[x as usize], &self.limbs[y as usize])
     }
+    /// The pairs in order, as two branches each.
     pub fn iter(&self) -> impl Iterator<Item = (&BoneIds, &BoneIds)> {
         (0..self.len()).map(|k| self.get(k))
     }
@@ -141,8 +153,11 @@ impl IntoIterator for LimbPairs {
     }
 }
 
-/// Pairs of branches of the same shape: apart from each other, with the same
-/// bone count and bone lengths within 25% of each other, position by position.
+/// Finds the pairs of branches that match. The two branches of a pair share no
+/// bone and have the same bone count. Taken in `branch` order, their bones are
+/// of similar length: at each position the longer is at most 1.25 times the
+/// shorter. The trees may still differ in shape. Every branch below a bone but
+/// the neck is a candidate, so a pair can be two legs or two larger branches.
 pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
     let children = child_bones(c);
     let limbs: Limbs = (0..c.bones.len())
@@ -247,8 +262,10 @@ pub(crate) fn limb_phase_pattern(
     limbs.len() > 1 && shift_limbs(c, &limbs, rng.index(3))
 }
 
-/// Every limb that ends in a foot: the bones from a leaf node up to the node
-/// where the body branches, or up to the neck.
+/// Every limb that ends in a foot, one for each leaf node, in node order. A
+/// limb is the chain of bones from a leaf node up to the node where the body
+/// branches, or up to the neck. It can be a single bone, and it never holds
+/// the neck.
 pub(super) fn leaf_limbs(c: &Creature) -> Limbs {
     let parents = parent_bones(c);
     let children = child_bones(c);
@@ -267,8 +284,9 @@ pub(super) fn leaf_limbs(c: &Creature) -> Limbs {
         .collect()
 }
 
-/// The child bones of `node` that are limbs without junctions: chains that
-/// end in one tip.
+/// The bones that hang from `node` and start a limb without junctions: a chain
+/// with no branching below it, which ends in one tip. `children` are the child
+/// lists of `c` (`child_bones`).
 pub(super) fn leaf_limbs_at(c: &Creature, children: &Children, node: usize) -> BoneIds {
     children[node]
         .iter()
@@ -291,24 +309,25 @@ pub(super) fn hip(c: &Creature, limb: &[usize]) -> usize {
     c.bones[limb[0]].a as usize
 }
 
-/// Where a limb's last bone ends along x in the starting pose.
+/// Where a limb's last bone ends along x (m) in the starting pose.
 pub(super) fn tip_x(c: &Creature, limb: &[usize]) -> f32 {
     c.nodes[foot(c, limb)].x
 }
 
-/// Where a limb's last bone ends in height in the starting pose.
+/// Where a limb's last bone ends in height (m) in the starting pose.
 pub(super) fn tip_y(c: &Creature, limb: &[usize]) -> f32 {
     c.nodes[foot(c, limb)].y
 }
 
-/// The leaf limbs from front (large x) to back.
+/// The leaf limbs from front (large x) to back, by the x of their feet. Limbs
+/// with the same x stay in the order of `leaf_limbs`.
 pub(super) fn limbs_front_to_back(c: &Creature) -> Limbs {
     let mut limbs = leaf_limbs(c);
     limbs.sort_stable_by(|x, y| tip_x(c, y).total_cmp(&tip_x(c, x)));
     limbs
 }
 
-/// The bones that carry an organ.
+/// The bones that carry an organ (organ mass above zero).
 pub(super) fn organ_bones(c: &Creature) -> BoneIds {
     (0..c.bones.len())
         .filter(|&b| c.bones[b].organ_mass > 0.0)
@@ -341,8 +360,8 @@ fn shift_limbs(c: &mut Creature, limbs: &[BoneIds], pattern: usize) -> bool {
     true
 }
 
-/// The muscles with an end on each part (a list of bones). A muscle on two
-/// parts belongs to the first.
+/// The muscles with an end on each part (a list of bones), one group for each
+/// part, in order. A muscle on two parts belongs to the first.
 pub(super) fn muscle_groups(c: &Creature, parts: &[BoneIds]) -> Bounded<MuscleIds, MAX_NODES> {
     let mut taken = [false; MAX_MUSCLES];
     parts
