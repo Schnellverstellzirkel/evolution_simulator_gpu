@@ -1,4 +1,7 @@
-//! Helpers the idea files (`idea_*.rs`) and `gait_bio.rs` share.
+//! Helpers the idea files (`idea_*.rs`) and `gait_bio.rs` share. They set a
+//! gene and note that it changed, list the nodes of a body, pick a leg, rank
+//! muscles by drive, do arithmetic on phases and scale a branch of bones. None
+//! of them is an operator.
 use super::limbs::clamped;
 use super::limbs::pick;
 use super::rhythm::leaf_limbs;
@@ -6,10 +9,11 @@ use super::{BoneIds, MuscleIds, branch, branch_nodes, child_bones, muscles_on};
 use crate::config::Config;
 use crate::evolution::{Creature, Muscle, Rng, max_bone_length};
 
-/// A change smaller than this does not count as a change.
+/// A change of at most this much does not count as a change.
 const EPSILON: f32 = 1.0e-4;
 
-/// Sets `*slot` to `value` and records whether that changed it.
+/// Sets `*slot` to `value` and `*changed` to true when the two differ by more
+/// than `EPSILON`. A difference of `EPSILON` or less leaves both alone.
 pub(super) fn set(slot: &mut f32, value: f32, changed: &mut bool) {
     if (*slot - value).abs() > EPSILON {
         *slot = value;
@@ -17,7 +21,8 @@ pub(super) fn set(slot: &mut f32, value: f32, changed: &mut bool) {
     }
 }
 
-/// Nodes with no bone below them, apart from the head: the feet and tips.
+/// Nodes with no bone below them, apart from the head: the feet and tips, in
+/// node order.
 pub(super) fn leaf_nodes(c: &Creature) -> BoneIds {
     let children = child_bones(c);
     (1..c.nodes.len())
@@ -25,13 +30,13 @@ pub(super) fn leaf_nodes(c: &Creature) -> BoneIds {
         .collect()
 }
 
-/// Every node but the head.
+/// Every node but the head, in node order.
 pub(super) fn body_nodes(c: &Creature) -> BoneIds {
     (1..c.nodes.len()).collect()
 }
 
 /// Nodes that are neither the head nor a leaf: the trunk and the joints of
-/// limbs.
+/// limbs, in node order.
 pub(super) fn inner_nodes(c: &Creature) -> BoneIds {
     let children = child_bones(c);
     (1..c.nodes.len())
@@ -39,23 +44,28 @@ pub(super) fn inner_nodes(c: &Creature) -> BoneIds {
         .collect()
 }
 
-/// Friction at `t` of the way from the lowest to the highest the body may
-/// have.
+/// The friction at `t` of the way from `cfg.min_friction` to
+/// `cfg.max_friction`. `t` is kept within 0 to 1.
 pub(super) fn grip(cfg: &Config, t: f32) -> f32 {
     cfg.min_friction + t.clamp(0.0, 1.0) * (cfg.max_friction - cfg.min_friction)
 }
 
-/// Node diameter at `t` of the way from the smallest to the largest.
+/// The node diameter at `t` of the way from `cfg.min_size` to `cfg.max_size`.
+/// `t` is kept within 0 to 1.
 pub(super) fn bulk(cfg: &Config, t: f32) -> f32 {
     cfg.min_size + t.clamp(0.0, 1.0) * (cfg.max_size - cfg.min_size)
 }
 
-/// A bone length kept within the body's limits.
+/// `length` (a bone length in meters) kept between 0.05 and the longest bone,
+/// `max_bone_length()`.
 pub(super) fn bone_length(length: f32) -> f32 {
     length.clamp(0.05, max_bone_length())
 }
 
-/// A leg with at least `bones` bones and, with `driven`, a muscle on it.
+/// The bones of a random leg (a limb from `leaf_limbs`) that has at least
+/// `bones` bones and, when `driven`, a muscle with an end on the leg. None when
+/// no leg fits. It takes one draw from `rng` when a leg fits and none
+/// otherwise.
 pub(super) fn some_leg(c: &Creature, rng: &mut Rng, bones: usize, driven: bool) -> Option<BoneIds> {
     let legs = leaf_limbs(c);
     let fit: BoneIds = (0..legs.len())
@@ -66,25 +76,29 @@ pub(super) fn some_leg(c: &Creature, rng: &mut Rng, bones: usize, driven: bool) 
     pick(&fit, rng).map(|i| legs[i])
 }
 
-/// How hard a muscle can pull: stiffness times its stroke.
+/// How hard a muscle can pull: its stiffness times its stroke (`long` minus
+/// `short`, at least 0).
 pub(super) fn drive(m: &Muscle) -> f32 {
     m.stiffness * (m.long - m.short).max(0.0)
 }
 
-/// Muscle indices sorted by drive, strongest first.
+/// Muscle indices sorted by `drive`, strongest first. Muscles of equal drive
+/// keep their index order.
 pub(super) fn by_drive(c: &Creature) -> MuscleIds {
     let mut ids: MuscleIds = (0..c.muscles.len()).collect();
     ids.sort_stable_by(|&a, &b| drive(&c.muscles[b]).total_cmp(&drive(&c.muscles[a])));
     ids
 }
 
-/// The muscles' phases wrapped into [0, 1).
+/// A phase (a share of a cycle) wrapped into [0, 1). One exception: a negative
+/// phase within about 3e-8 of 0 comes back as exactly 1.
 pub(super) fn wrap(phase: f32) -> f32 {
     phase.rem_euclid(1.0)
 }
 
-/// The circular mean of phases (each a share of a cycle), or None when they
-/// cancel out.
+/// The circular mean of `phases` (each a share of a cycle), as a phase from
+/// `wrap`. None when they cancel out: their unit vectors add up to a length of
+/// 0.001 or less. An empty list gives None.
 pub(super) fn circular_mean(phases: impl Iterator<Item = f32>) -> Option<f32> {
     let (mut s, mut k) = (0.0f32, 0.0f32);
     for p in phases {
@@ -101,14 +115,18 @@ pub(super) fn phase_gap(a: f32, b: f32) -> f32 {
     if d > 0.5 { d - 1.0 } else { d }
 }
 
-/// A coin flip.
+/// A coin flip. It takes one draw from `rng`.
 pub(super) fn coin(rng: &mut Rng) -> bool {
     rng.unit() < 0.5
 }
 
-/// Scales the branch that starts at bone `root` about its root joint by
-/// `factor`, within the bone limits, and the strokes of the muscles inside it
-/// with it. False when the factor is within 2% of 1 after the limits.
+/// Scales the branch that starts at bone `root` by `factor` about the root
+/// joint, which is node `a` of the root bone. Its bone lengths and the `short`
+/// and `long` of every muscle with both ends in the branch scale by the same
+/// factor. First the factor is limited so that no bone ends up shorter than
+/// 0.03 or longer than `max_bone_length()`. If no factor meets both limits, the
+/// shortest-bone limit wins. Nodes stay inside the start region (`clamped`).
+/// False, with nothing changed, when the limited factor is within 2% of 1.
 pub(super) fn scale_branch(c: &mut Creature, root: usize, factor: f32) -> bool {
     let bones = branch(c, root);
     let low = bones
@@ -151,10 +169,13 @@ mod tests {
     use crate::config::Config;
     use crate::evolution::Rng;
 
-    /// Every idea operator that says it changed a body did change it, and
-    /// each fits a fair share of bodies, so none is dead code.
+    /// Every idea operator reports a change exactly when the body changed, and
+    /// each applies in at least 8 of its 320 tries (160 bodies, 2 variants
+    /// each), so none is dead code.
     #[test]
     fn idea_operators_change_the_body_they_report_and_fit_some_bodies() {
+        // A sloped world with hurdles, because `slope_lean` and `hurdle_legs`
+        // do nothing on flat ground.
         let cfg = Config {
             slope: 0.1,
             hurdles: 0.2,
