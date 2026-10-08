@@ -172,11 +172,12 @@ fn extent(c: &Creature) -> (f32, f32, f32) {
 // Operators.
 
 /// Makes every other leg a copy of the best one, the leg with the most muscle
-/// drive. Each leg keeps its hip and its own place in the stride (its lead
-/// muscle keeps its phase), and a leg that points the other way gets the
-/// mirror image. A body whose legs all share one design is what Sims' and
-/// Cheney's regular creatures were, and the best leg's design is proven by
-/// the distance the body already covers.
+/// drive. Each copy hangs from the hip of the leg it replaces, and a leg that
+/// points the other way gets the mirror image. The copy's muscles move by the
+/// phase difference between the strongest muscles of the two legs, so each leg
+/// keeps its own place in the stride. A leg that already has the best leg's
+/// shape stays as it is. A body whose legs all share one design is regular, and
+/// the best leg's design is one that already works in this body.
 pub(crate) fn clone_best_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
     if legs.len() < 2 {
@@ -210,13 +211,15 @@ pub(crate) fn clone_best_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
     replant(c, cfg, &jobs, rng)
 }
 
-/// Makes the half of the body on one side of its middle the mirror image of
-/// the other half: each leg of the source half is reflected onto the leg of
-/// the other half that lies nearest to its mirrored hip position, and that
-/// leg runs half a cycle later (a trot) or with it (a bound). Fore and hind
-/// limbs of a mammal are close to such mirror images of each other, which
-/// is why a cheetah and a horse can turn a single bone plan into two
-/// ends of one gait (Alexander's gait work).
+/// Makes one half of the body the mirror image of the other. A coin flip picks
+/// the source half, the front or the back. Each of its legs is reflected onto a
+/// leg of the other half. That is the leg whose hip lies nearest to the mirror
+/// image of the source hip, among the legs that no earlier source took, and it
+/// must lie within 0.4 of the body span of that mirror image. The new leg runs
+/// half a cycle later (a trot, two times in three) or with the source (a
+/// bound). Legs with hips within 4% of the span of the middle stay as they are.
+/// The fore and hind limbs of a mammal are close to mirror images of each
+/// other.
 pub(crate) fn mirror_body_halves(
     c: &mut Creature,
     cfg: &Config,
@@ -262,11 +265,18 @@ pub(crate) fn mirror_body_halves(
     replant(c, cfg, &jobs, rng)
 }
 
-/// Copies the trunk bone `trunk` with the leg limbs on its child node and
-/// inserts the copy after it, the same size as the original. The copy's
-/// muscles run `phase` of a cycle later, and with `mirror` its limbs are
-/// reflected about the trunk joint. At most three muscles cross each joint
-/// copy. Returns the copy's bone.
+/// Repeats the bone `trunk` once, with the limbs on its child node (the chains
+/// of bones without a junction that end in one tip, `leaf_limbs_at`). The copy
+/// continues the trunk from that node with the same length and joint range but
+/// no organ. Copies of the limbs hang from its end node, reflected when
+/// `mirror` is set, and the rest of the body below the trunk moves along to
+/// hang from the copy too. Up to three muscles that join the trunk bone to the
+/// bone above it are copied across the new joint, the ones with the most drive.
+/// Each limb brings at most three muscles. The copied muscles run `phase` of a
+/// cycle later, and the strokes of the older muscles follow their new spans.
+/// Returns the copy's bone, or `None` when the trunk is a neck, no limb hangs
+/// from its child node, or the body has no room. If a limb does not fit, it
+/// returns `None` after the body has changed, so call it on a copy.
 fn repeat_segment(
     c: &mut Creature,
     cfg: &Config,
@@ -349,8 +359,12 @@ fn repeat_segment(
     Some(copy)
 }
 
-/// Shared body of the two segment repeaters: picks a trunk bone that carries
-/// legs, repeats it once at the same size, and gives idle tips back.
+/// Shared body of the two segment repeaters. It picks a bone that is not the
+/// neck and has limbs on its child node, such as a trunk bone with its legs, and
+/// repeats it once on a copy of the body (`repeat_segment`). Then it sheds idle
+/// tips (`shed_tips`) so that the body ends at most one node bigger, and closes
+/// the motor ring. The body stays as it was if the repeat does not fit, too few
+/// tips can go, or the ring does not close.
 fn repeat_one(c: &mut Creature, cfg: &Config, rng: &mut Rng, phase: f32, mirror: bool) -> bool {
     let children = child_bones(c);
     let trunks: BoneIds = (0..c.bones.len())
@@ -375,10 +389,10 @@ fn repeat_one(c: &mut Creature, cfg: &Config, rng: &mut Rng, phase: f32, mirror:
 }
 
 /// Repeats a trunk segment with its legs once, the copy the same size as the
-/// original and its muscles half a cycle later: a body of identical
-/// segments whose neighbours alternate, as in a centipede or the legs of a
-/// walking insect, which the central pattern generator literature describes
-/// as one oscillator per segment coupled in antiphase.
+/// original and its muscles half a cycle later. Neighbouring segments then
+/// alternate, as in a centipede or the legs of a walking insect, which the
+/// central pattern generator literature describes as one oscillator per
+/// segment coupled in antiphase.
 pub(crate) fn repeat_equal_segment(
     c: &mut Creature,
     cfg: &Config,
@@ -388,11 +402,11 @@ pub(crate) fn repeat_equal_segment(
     repeat_one(c, cfg, rng, 0.5, false)
 }
 
-/// Repeats a trunk segment with its legs once as a mirror image: the legs of
+/// Repeats a trunk segment with its legs once as a mirror image. The legs of
 /// the copy lean the opposite way and their joint ranges are reflected, so
 /// the two segments push toward and away from each other like the fore and
-/// hind limbs of a quadruped. The copy runs with the original or half a
-/// cycle later.
+/// hind limbs of a quadruped. A coin flip makes the copy run with the original
+/// or half a cycle later.
 pub(crate) fn repeat_segment_mirrored(
     c: &mut Creature,
     cfg: &Config,
