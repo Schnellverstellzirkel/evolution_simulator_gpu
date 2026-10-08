@@ -1,23 +1,12 @@
-//! Structural mutations that change a working assembly of bones, joints and
-//! muscles together: copy, grow, fuse, reconnect and retime whole limbs, so a
-//! child keeps more of its parent's gait than a single random edit allows.
-//!
-//! Every operator is on (docs/anatomy-operators.md has the audit and the
-//! search A/B). The structural emitter picks uniformly among the classic
-//! operators, the ones below, one slot that the `SHARED_SLOT`
-//! operators share and one for the `CONTROLLER_SLOT` operators, and tries up to four times when the chosen operator
-//! does not apply to the body.
-//!
-//! Conventions every operator follows:
-//! - The creature arrives repaired, so its bones are in canonical order:
-//!   bone `j` joins its parent node `a` to its child node `b`, node 0 is the
-//!   head, and the bone at the head is the neck. Bones an operator adds keep
-//!   that convention (`a` is the node already in the tree).
-//! - An operator returns whether it changed the creature. It keeps within
-//!   `cfg.max_nodes` and `cfg.max_muscles`, and it never removes the head or
-//!   the neck. `repair` runs after it (in `offspring`), which clamps
-//!   genes, restores canonical order and the muscle ring, and lines the nodes
-//!   up with the bone lengths.
+//! The anatomy operators are structural mutations that change a working
+//! assembly of bones, joints and muscles together. They copy, grow, fuse,
+//! reconnect and retime whole limbs, so a child keeps more of its parent's
+//! gait than after a single random edit. This file lists the operators in
+//! `OPERATORS`, sorts them into pick slots and holds the body helpers that the
+//! operator files share. `structural_mutation_among` in `evolution.rs` picks a
+//! slot at random, then an operator in the slot, and tries up to four times
+//! until one changes the body.
+
 use super::{
     Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, StoredCreature,
     bone_point,
@@ -25,6 +14,11 @@ use super::{
 use crate::config::Config;
 use std::cell::OnceCell;
 
+// The operator files. `BASE_OPERATORS` lists the operators of `limbs`,
+// `junctions`, `muscles`, `rhythm`, `extra`, `controller`, `compound` and
+// `legs`. Each `gait_*` and `idea_*` file has a table of its own (`GAIT_FILES`).
+// `ideas` has no operators, only helpers that the `idea_*` files and `gait_bio`
+// share.
 mod compound;
 mod controller;
 mod extra;
@@ -56,10 +50,10 @@ mod rhythm;
 pub(super) type BoneIds = Bounded<usize, MAX_NODES>;
 /// Indices of muscles of one body.
 pub(super) type MuscleIds = Bounded<usize, MAX_MUSCLES>;
-/// For each node, the bones it is the parent of, in bone order
-/// (`child_bones`): `children[node]` is a slice. Kept as one list with an
-/// offset per node (about 300 bytes): an array of a `BoneIds` per node is
-/// 8.4 KB to build and to move, and operators build one per call.
+/// For each node, the bones it is the parent of, in bone order. `child_bones`
+/// builds it and `children[node]` is a slice. It is one list with an offset per
+/// node (about 300 bytes), because an array of a `BoneIds` per node is 8.4 KB to
+/// build and to move, and operators build one per call.
 pub(super) struct Children {
     /// Node `n`'s bones are `bones[start[n]..start[n + 1]]`.
     start: [u8; MAX_NODES + 1],
@@ -74,7 +68,8 @@ impl std::ops::Index<usize> for Children {
 }
 
 impl Children {
-    /// The bones of every node, the head first.
+    /// One slice of bones per node number up to `MAX_NODES`, the head first.
+    /// A number that the body does not use gives an empty slice.
     pub(super) fn iter(&self) -> impl Iterator<Item = &[usize]> {
         (0..MAX_NODES).map(|node| &self[node])
     }
@@ -82,12 +77,15 @@ impl Children {
 /// Lists of bones, one per limb.
 pub(super) type Limbs = Bounded<BoneIds, MAX_NODES>;
 
-/// What an operator may use besides the creature: another archive elite,
-/// for operators that graft from a second body.
+/// What an operator may use besides the creature, the limits and the random
+/// stream: a donor, which is another elite of the archive, for the operators
+/// that take parts from a second body. The donor may be missing, and an
+/// operator that needs one then changes nothing.
 pub(super) struct Context<'a> {
+    /// The donor, when the caller already holds it as a `Creature`.
     body: Option<&'a Creature>,
-    /// Or the elite's genes, unpacked into the cell the first time an
-    /// operator reads them: most operators never do.
+    /// The donor as stored genes, with the cell to unpack it into. It is
+    /// unpacked the first time an operator reads it, and most operators never do.
     genes: Option<(&'a StoredCreature, &'a OnceCell<Creature>)>,
 }
 
@@ -119,9 +117,27 @@ impl<'a> Context<'a> {
     }
 }
 
+/// A structural operator. It edits the creature in place and returns whether
+/// it changed the body. It draws from the random stream, reads the body limits
+/// in `Config` and takes its donor body, if it needs one, from the `Context`.
+/// Operators are plain functions, listed under their names in
+/// `BASE_OPERATORS` and in the `OPS` table of each gait file.
+///
+/// Every operator follows these conventions:
+/// - The creature arrives with its bones in canonical order. Bone `j` joins its
+///   parent node `a` to its child node `b`, node 0 is the head, and the bone at
+///   the head is the neck. Bones an operator adds keep that convention, with
+///   `a` the node already in the tree.
+/// - An operator keeps within `cfg.max_nodes` and `cfg.max_muscles`, and it
+///   never removes the head or the neck.
+/// - The caller runs `repair` after it (`offspring` does). `repair` clamps
+///   genes, restores canonical order and the muscle ring, and lines the nodes
+///   up with the bone lengths.
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
 
-/// Every operator, by name: the ones below, then those of the gait files.
+/// Every operator with its name: `BASE_OPERATORS` first, then the operators of
+/// each file in `GAIT_FILES`. `apply`, `is_compound` and `Enabled` index into
+/// this list. `docs/anatomy-operators.md` describes the operators by group.
 pub(super) static OPERATORS: std::sync::LazyLock<Vec<(&'static str, Operator)>> =
     std::sync::LazyLock::new(|| {
         BASE_OPERATORS
@@ -131,9 +147,10 @@ pub(super) static OPERATORS: std::sync::LazyLock<Vec<(&'static str, Operator)>> 
             .collect()
     });
 
-/// The gait operators, one list per file. Each file's operators share one
-/// pick slot, so a hundred of them do not crowd out the others, and every one
-/// is a compound operator (a whole change, no parameter noise after it).
+/// The operators of the `gait_*` and `idea_*` files, one list per file. Each
+/// file's operators share one pick slot, so the many operators of these files
+/// do not crowd out the others. Every one is a compound operator (a whole
+/// change, with no parameter noise after it).
 const GAIT_FILES: &[&[(&str, Operator)]] = &[
     gait_legs::OPS,
     gait_spine::OPS,
@@ -153,7 +170,8 @@ const GAIT_FILES: &[&[(&str, Operator)]] = &[
     idea_shape::OPS,
 ];
 
-/// The operators before the gait files.
+/// The operators outside the gait files (`GAIT_FILES`). The order of this table
+/// fixes which operator each random pick selects.
 const BASE_OPERATORS: &[(&str, Operator)] = &[
     ("copy_limb", limbs::copy_limb),
     ("grow_actuated_tip", limbs::grow_actuated_tip),
@@ -233,10 +251,10 @@ const BASE_OPERATORS: &[(&str, Operator)] = &[
     ("tuck_leg_under", legs::tuck_leg_under),
 ];
 
-/// Operators that share one pick slot: together they are as likely as one
-/// other operator. They keep much of a parent's gait in the audit, but with a
-/// slot each the search got worse, and with one shared slot it did not
-/// (docs/anatomy-operators.md).
+/// The gentle operators. They share one pick slot, so together they are as
+/// likely to be picked as one other operator. They keep much of a parent's gait
+/// in the audit (`examples/mutation_audit.rs`). With a slot each the search got
+/// worse, and with one shared slot it did not.
 const SHARED_SLOT: &[&str] = &[
     "mirror_limb_timing",
     "swap_limb_programs",
@@ -249,14 +267,16 @@ const SHARED_SLOT: &[&str] = &[
 ];
 
 /// Grafts a limb of `donor` onto `c` (`graft_donor_limb`), for crossover
-/// between different body plans.
+/// between different body plans. Returns whether it changed `c`.
 pub(super) fn graft_from(c: &mut Creature, cfg: &Config, rng: &mut Rng, donor: &Creature) -> bool {
     let cx = Context::of(Some(donor));
     limbs::graft_donor_limb(c, cfg, rng, &cx)
 }
-/// The controller operators (`controller.rs`) share a second pick slot. With a
-/// slot each they looked slightly worse in the search (9 seeds), so they
-/// share one as the `SHARED_SLOT` operators do.
+
+/// The controller operators of `controller.rs` share a second pick slot, all
+/// but `shift_gait_start`, which has a slot of its own. With a slot each they
+/// looked slightly worse in the search (9 seeds), so they share one as the
+/// `SHARED_SLOT` operators do.
 const CONTROLLER_SLOT: &[&str] = &[
     "limb_stroke_scale",
     "limb_posture_shift",
@@ -272,9 +292,10 @@ const CONTROLLER_SLOT: &[&str] = &[
     "reflex_reset_shift",
 ];
 
-/// The compound operators (`compound.rs`). Each is a whole change by
-/// itself, so a child that one of them made gets no parameter noise after it:
-/// the noise would only blur a move that was built to be coherent.
+/// The compound operators of `compound.rs` and `legs.rs`. The operators of the
+/// gait files are compound too (`GAIT_FILES`). Each is a whole change by
+/// itself, so a child that one of them made gets no parameter noise after it.
+/// The noise would only blur a move that was built to be coherent.
 const COMPOUND: &[&str] = &[
     "limb_length_gradient",
     "symmetrize_limb_pair",
@@ -295,7 +316,7 @@ const COMPOUND: &[&str] = &[
     "tuck_leg_under",
 ];
 
-/// The gait file that holds operator `name`, if any.
+/// The place in `GAIT_FILES` of the file that lists operator `name`, if any.
 fn gait_file(name: &str) -> Option<usize> {
     GAIT_FILES
         .iter()
@@ -307,26 +328,33 @@ pub(super) fn is_compound(index: usize) -> bool {
     enabled().compound.get(index).copied().unwrap_or(false)
 }
 
-/// The enabled operators, as indices into `OPERATORS`.
+/// The enabled operators, as indices into `OPERATORS`, split by pick slot.
+/// Every operator is enabled.
 pub(super) struct Enabled {
-    /// For each operator, whether it is a compound one (`COMPOUND`).
+    /// For each operator of `OPERATORS`, whether it is a compound one
+    /// (in `COMPOUND` or in a gait file).
     pub compound: Vec<bool>,
-    /// Operators with a pick slot each (not in a shared group or gait file).
+    /// Operators with a pick slot each (not in `SHARED_SLOT`,
+    /// `CONTROLLER_SLOT` or a gait file).
     pub single: Vec<usize>,
     /// Operators that share one pick slot (`SHARED_SLOT`).
     pub shared: Vec<usize>,
     /// Operators that share the second pick slot (`CONTROLLER_SLOT`).
     pub controller: Vec<usize>,
-    /// The operators of each gait file, one pick slot per file.
+    /// The operators of each gait file, one pick slot per file, in the order of
+    /// `GAIT_FILES`.
     pub gait: Vec<Vec<usize>>,
 }
 
-/// The operators, split by pick slot.
+/// The enabled operators, split by pick slot. It is built on the first call.
 pub(super) fn enabled() -> &'static Enabled {
     static ENABLED: std::sync::OnceLock<Enabled> = std::sync::OnceLock::new();
     ENABLED.get_or_init(|| split((0..OPERATORS.len()).collect()))
 }
 
+/// Sorts the operators at `indices` into pick slots and keeps their order
+/// within each slot. `compound` covers every operator of `OPERATORS`, whatever
+/// `indices` holds.
 fn split(indices: Vec<usize>) -> Enabled {
     let mut enabled = Enabled {
         compound: OPERATORS
@@ -364,13 +392,16 @@ pub(super) fn apply(
     (OPERATORS[index].1)(creature, cfg, rng, cx)
 }
 
-// Shared helpers. They read the skeleton from `a` (parent) and `b` (child),
-// so they also work on bones an operator appended.
+// Shared helpers. They read the skeleton from the `a` (parent) and `b` (child)
+// nodes of each bone, so they also work on bones that an operator has just
+// appended.
 
 /// Picks one of the options `each` passes to its sink, as picking from the
 /// collected list would (one `rng.index` draw over their count), without
-/// storing them: `each` runs twice, once to count and once to find the one
-/// picked. For option lists too long to hold on the stack.
+/// storing them. `each` runs twice, once to count and once to find the one
+/// picked, so it must pass the same options in the same order both times. With
+/// no options it returns `None` and draws nothing. For option lists too long to
+/// hold on the stack.
 pub(super) fn pick_each<T>(rng: &mut Rng, each: impl Fn(&mut dyn FnMut(T))) -> Option<T> {
     let mut count = 0usize;
     each(&mut |_| count += 1);
@@ -389,7 +420,7 @@ pub(super) fn pick_each<T>(rng: &mut Rng, each: impl Fn(&mut dyn FnMut(T))) -> O
     chosen
 }
 
-/// Bones at a node.
+/// How many bones touch `node`, as parent or as child.
 pub(super) fn degree(c: &Creature, node: usize) -> usize {
     c.bones
         .iter()
@@ -408,7 +439,7 @@ pub(super) fn parent_bones(c: &Creature) -> Bounded<Option<usize>, MAX_NODES> {
     parent
 }
 
-/// For each node, the bones it is the parent of.
+/// For each node, the bones it is the parent of, in bone order.
 pub(super) fn child_bones(c: &Creature) -> Children {
     let nodes = c.nodes.len();
     // Count each node's bones, then lay the lists out one after another.
@@ -462,7 +493,8 @@ pub(super) fn branch_nodes(c: &Creature, bones: &[usize]) -> BoneIds {
     bones.iter().map(|&b| c.bones[b].b as usize).collect()
 }
 
-/// Muscles with both ends (`both`) or at least one end on `bones`.
+/// The muscles, in muscle order, that have both ends (`both`) or at least one
+/// end on one of `bones`.
 pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> MuscleIds {
     let on = |b: u32| bones.contains(&(b as usize));
     (0..c.muscles.len())
@@ -477,8 +509,8 @@ pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> MuscleIds
         .collect()
 }
 
-/// Whether the body has room for `nodes` more nodes and `muscles` more
-/// muscles.
+/// Whether the body has room for `nodes` more nodes and `muscles` more muscles
+/// under `cfg.max_nodes` and `cfg.max_muscles`.
 pub(super) fn room(c: &Creature, cfg: &Config, nodes: usize, muscles: usize) -> bool {
     c.nodes.len() + nodes <= cfg.max_nodes.min(MAX_NODES)
         && c.muscles.len() + muscles <= cfg.max_muscles.min(MAX_MUSCLES)
@@ -514,8 +546,8 @@ pub(super) fn remove_parts(c: &mut Creature, bones: &[usize], nodes: &[usize]) {
     });
 }
 
-/// New index of each of `len` items after `removed` go (`usize::MAX` for a
-/// removed one).
+/// The new index of each of `len` items once the ones in `removed` are taken
+/// out, or `usize::MAX` for a removed item.
 fn renumber(len: usize, removed: &[usize]) -> BoneIds {
     let mut map = BoneIds::filled(len, 0);
     let mut next = 0;
@@ -537,8 +569,8 @@ pub(super) fn span(c: &Creature, m: &Muscle) -> f32 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
-/// Sets a muscle's stroke around its span in the pose, keeping the ratios of
-/// `short` and `long` to the span that `template` has (or 0.8 and 1.1).
+/// Sets a muscle's stroke from its span in the pose. `short` and `long` keep
+/// the ratios to the span that `template` has, or 0.8 and 1.1 without one.
 pub(super) fn fit_stroke(c: &Creature, m: &mut Muscle, template: Option<&Muscle>) {
     let (short, long) = template
         .map(|t| {
@@ -551,9 +583,10 @@ pub(super) fn fit_stroke(c: &Creature, m: &mut Muscle, template: Option<&Muscle>
     m.long = (length * long).max(m.short);
 }
 
-/// A new muscle from `bone_a` to `bone_b` with the given anchors. Its rhythm
-/// (period, phase, duty, stiffness, sensor, reset) comes from `template`, or
-/// is random without one; its stroke fits its span.
+/// A new muscle from `bone_a` to `bone_b`. Its anchors are `anchors`, kept
+/// between 0 and 1. Its period, phase, duty, stiffness, sensor, reset and
+/// tendon come from `template`, or from a new random muscle without one. Its
+/// stroke fits its span (`fit_stroke`).
 pub(super) fn new_muscle(
     c: &Creature,
     bone_a: usize,
@@ -574,13 +607,13 @@ pub(super) fn new_muscle(
     m
 }
 
-/// Copies the branch that starts at `bone` onto node `at`, placing each
-/// copied node at `place(original position)`. The copy brings its joint
-/// ranges (mirrored with `mirror`) and every muscle inside the branch, plus
-/// the muscles from the branch root to the bone above it, reattached to the
-/// bone above `at` when there is one. Copied muscles shift their phase by
-/// `phase`. Returns the new root bone, or
-/// `None` without room.
+/// Copies the branch that starts at `bone` onto node `at`. Each copied node
+/// goes to `place(original position)`, and each copied bone keeps its joint
+/// range, mirrored when `mirror` is set. The copy brings every muscle inside
+/// the branch. It also brings the hinge muscles, which join the branch root to
+/// the bone above it, and attaches them to the bone above `at`, but only when
+/// both of those bones exist. Copied muscles shift their phase by `phase`.
+/// Returns the new root bone, or `None` when the body has no room.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_branch(
     c: &mut Creature,
@@ -594,8 +627,9 @@ pub(super) fn copy_branch(
     copy_branch_limited(c, cfg, bone, at, place, mirror, phase, usize::MAX)
 }
 
-/// `copy_branch` that brings at most `quota` muscles: when the branch and
-/// its hinge have more, the copy keeps the ones with the most drive.
+/// `copy_branch` that brings at most `quota` muscles. When the branch and its
+/// hinge muscles have more, the copy keeps the ones with the most drive
+/// (`extra::drive`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_branch_limited(
     c: &mut Creature,
@@ -636,6 +670,8 @@ pub(super) fn copy_branch_limited(
     let mut new_bone = [usize::MAX; MAX_NODES];
     let mut new_node = [usize::MAX; MAX_NODES];
     new_node[c.bones[bone].a as usize] = at;
+    // `bones` lists parents before children, so the parent node of each bone is
+    // already mapped when its turn comes.
     for &b in &bones {
         let old = c.bones[b];
         let child = old.b as usize;
@@ -662,6 +698,8 @@ pub(super) fn copy_branch_limited(
             ..old
         });
     }
+    // A muscle end on a copied bone moves to its copy. Any other end is on the
+    // bone above the branch root (a hinge muscle) and moves to the bone above `at`.
     let remap = |b: u32| -> u32 {
         match new_bone[b as usize] {
             usize::MAX => above_target.expect("hinge muscles need a bone above") as u32,
@@ -686,7 +724,8 @@ mod tests {
     use super::*;
     use crate::evolution::{Population, grow_for_benchmark, random_creature_from, repair};
 
-    /// Repaired bodies of 3 to 16 nodes grown with the classic operators.
+    /// `count` repaired bodies, each grown with the classic operators toward 3
+    /// to 16 nodes (at most `cfg.max_nodes`).
     pub(super) fn bodies(cfg: &Config, count: usize) -> Vec<Creature> {
         (0..count)
             .map(|i| {
@@ -704,12 +743,16 @@ mod tests {
         bodies(&Config::default(), 160)
     }
 
-    /// Whether two phases are the same point of the cycle.
+    /// Whether two phases are the same point of the cycle, to within 1e-4.
     pub(super) fn same_phase(a: f32, b: f32) -> bool {
         let d = (a - b).rem_euclid(1.0);
         !(1e-4..=1.0 - 1e-4).contains(&d)
     }
 
+    /// Operator names are unique, every name in `SHARED_SLOT` and
+    /// `CONTROLLER_SLOT` is an operator, the pick slots together hold each
+    /// operator once, and the operators with a slot of their own keep table
+    /// order.
     #[test]
     fn operator_names_are_unique() {
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
@@ -799,8 +842,8 @@ mod tests {
         }
     }
 
-    /// Bodies at the default caps: grown toward 32 nodes and filled toward
-    /// 96 muscles, where the bounded arrays are full.
+    /// Bodies at the default caps: grown toward 22 to 32 nodes and filled toward
+    /// 93 to 96 muscles, where the bounded arrays are full or nearly full.
     fn full_bodies(cfg: &Config, count: usize) -> Vec<Creature> {
         (0..count)
             .map(|i| {
@@ -899,8 +942,9 @@ mod tests {
                 if !apply(index, &mut c, &cfg, &mut rng, &cx) {
                     continue;
                 }
-                // Breeding follows with a parameter mutation; the game test
-                // at these limits uses mutation 5.
+                // Breeding follows with a parameter mutation. 0.175 is its
+                // scale of 0.035 at mutation strength 5, which the game test
+                // `mutation_keeps_valid_graphs_at_limits` uses at these limits.
                 c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.175);
                 repair(&mut c, &cfg, &mut rng);
                 let mut pop = Population::default();
