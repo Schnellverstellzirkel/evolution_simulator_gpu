@@ -1,14 +1,17 @@
-//! Idea operators that grow, cut and link parts of the body: arms that
-//! balance, probes ahead of a foot, kickstands, forked tips, a longer or
-//! shorter trunk, an inchworm pair of ends, three-legged copies.
+//! Idea operators that grow, cut and link parts of the body: a balance arm, a
+//! toe ahead of the foremost foot, a kickstand, a forked tip, a longer or
+//! shorter trunk, inchworm ends, a leg copied twice, a stub or a tail tip
+//! removed, a muscle that braces a joint or links two legs, and a free
+//! pendulum.
 //!
-//! Every operator is a whole change on its own, so its child gets no
-//! parameter noise, and the operators of this file share one pick slot. Those
-//! that add parts stay within `Config::max_nodes` and `max_muscles`.
+//! Each operator is a whole change on its own, so no parameter noise follows
+//! it, and the operators of this file share one pick slot (`GAIT_FILES` in
+//! `mod.rs`). Those that add parts stay within `Config::max_nodes` and
+//! `max_muscles`.
 //!
 //! The sources are Herr and Popovic (2008, arms swung against the legs cancel
-//! the angular momentum of a gait), Hirose (1993, an inchworm moves by
-//! anisotropic friction of its two ends), Sims (1994, evolved bodies grow
+//! the angular momentum of a gait), Hirose (1993, an inchworm crawls on a
+//! front that slides and a rear that grips), Sims (1994, evolved bodies grow
 //! parts that carry a muscle and its timing), and Bongard and Pfeifer (2003,
 //! bodies grow part by part).
 use super::ideas::{bulk, coin, leaf_nodes};
@@ -38,15 +41,19 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("dangling_pendulum", dangling_pendulum),
 ];
 
-/// The median bone length of the body, a scale for new parts.
+/// The median bone length of the body (the longer middle one when the count is
+/// even), or 0.2 m for a body with no bones. New parts are sized from it.
 fn typical_bone(c: &Creature) -> f32 {
     let mut lengths: Vec<f32> = c.bones.iter().map(|b| b.rest_length).collect();
     lengths.sort_by(|a, b| a.total_cmp(b));
     lengths.get(lengths.len() / 2).copied().unwrap_or(0.2)
 }
 
-/// Appends a bone from node `from` at `angle` and `length`, with a new node of
-/// `diameter` at its end. Returns the new bone's index.
+/// Appends a bone from node `from`, pointing at `angle` (radians, 0 along +x)
+/// and `length` long (held between 0.04 m and the longest bone), with a new
+/// node of `diameter` at its end. The node takes the grip of `from` and is kept
+/// inside the region where nodes may start (`clamped`). The joint gets a narrow
+/// range (`narrow`). Returns the new bone's index.
 fn add_bone(
     c: &mut Creature,
     from: usize,
@@ -73,9 +80,13 @@ fn add_bone(
     c.bones.len() - 1
 }
 
-/// A bone grows up from a trunk node, a light arm with a narrow joint and a
-/// muscle half a cycle against the legs' timing, so it swings against the gait
-/// as arms do in a runner (Herr and Popovic 2008).
+/// A light arm grows up from an inner node (one with bones below it, other
+/// than the end of the neck). It is 0.6 to 1.0 times a typical bone long, leans
+/// up to 0.6 rad off vertical and ends in a node of the smallest size, with a
+/// narrow joint. A muscle joins it to the bone the inner node hangs from. The
+/// muscle has the timing of a random muscle of the body, half a cycle later, so
+/// the arm swings against the gait as arms do in a runner (Herr and Popovic
+/// 2008). Does nothing for a body with no muscle.
 fn sprout_balance_arm(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 1, 1) || c.muscles.is_empty() {
         return false;
@@ -100,8 +111,14 @@ fn sprout_balance_arm(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Conte
     true
 }
 
-/// A toe grows forward from the foremost foot with a muscle that senses its
-/// landing: the touch of the probe resets the gait ahead of the foot itself.
+/// A toe grows forward from the foremost foot (the leaf with the largest x). It
+/// points from 0.5 rad down to 0.1 rad up, is half as long as the bone that
+/// ends in the foot (at least 5 cm) and ends in a node of the smallest size. A
+/// muscle joins the toe to that bone, with the timing of the first muscle on
+/// that bone (or else of the first muscle of the body). The toe's far end
+/// senses touchdown, and a touchdown sets the muscle to a phase a quarter of a
+/// cycle after its start phase. The toe can land before the foot does, so the
+/// touch of the probe resets the gait ahead of the foot itself.
 fn forefoot_probe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 1, 1) {
         return false;
@@ -130,8 +147,10 @@ fn forefoot_probe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) 
     true
 }
 
-/// A passive bone grows back and down from the rearmost trunk node, a
-/// kickstand that props the tail end.
+/// A passive bone grows back and down from the rearmost inner node (other than
+/// the end of the neck), a kickstand that props the tail end. It points 0.2 to
+/// 0.7 rad behind straight down, is 0.7 to 1.1 times a typical bone long, ends
+/// in a node of the smallest size and has a joint range of 0.1 rad each way.
 fn grow_kickstand(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 1, 0) {
         return false;
@@ -152,8 +171,11 @@ fn grow_kickstand(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) 
     true
 }
 
-/// A leaf bone gets a sibling at the same joint, turned 0.4 to 0.8 rad, with a
-/// muscle across the pair: a foot with two toes.
+/// A leaf bone (not the neck) gets a sibling at the joint it hangs from: a bone
+/// turned 0.4 to 0.8 rad to one side of it, 0.7 to 1.0 times as long, with a
+/// node of the same size at its end. A muscle joins the pair, with the timing
+/// of the first muscle on the leaf bone (or a random one if it has none), half
+/// a cycle later. The pair is a foot with two toes.
 fn fork_tip(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 1, 1) {
         return false;
@@ -420,8 +442,10 @@ fn shed_tail_tip(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context)
     true
 }
 
-/// A bone hangs free from a trunk node with the widest joint range and no
-/// muscle: a pendulum that swings with the gait and moves the weight about.
+/// A bone hangs straight down from an inner node (other than the end of the
+/// neck), with the widest joint range and no muscle. It is 0.5 to 0.9 times a
+/// typical bone long and ends in a heavy node, one in the upper half of the size
+/// range. It is a pendulum that swings with the gait and moves the weight about.
 fn dangling_pendulum(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 1, 0) {
         return false;
