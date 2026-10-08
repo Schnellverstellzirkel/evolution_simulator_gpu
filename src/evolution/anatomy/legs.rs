@@ -217,10 +217,15 @@ pub(crate) fn mirror_leg_fore_aft(
     true
 }
 
-/// Moves a leg's hip along the trunk to the nearest node that lies farther
-/// from the middle of the body, so the legs spread out toward the ends
-/// instead of bunching. The leg keeps its shape and muscles, and the strokes
-/// of the muscles from its first bone to the bone above are refitted.
+/// Moves a leg's hip to the nearest node that lies farther from the middle of
+/// the body, so the legs spread out toward the ends instead of bunching. The
+/// middle is the mean x of the nodes. The new hip must lie more than 0.04 m
+/// farther from it than the old one, and nearest means the smallest sum of the
+/// x gap and the y gap. Any node can serve but the head, the old hip and the
+/// leg's own, so the leg can end up on another leg. The whole leg moves by the
+/// same offset. The muscles that join its first bone to the bone above the old
+/// hip now join it to the bone above the new one. Then every muscle stroke is
+/// scaled by the change in the muscle's span (`keep_strokes`).
 pub(crate) fn spread_leg_attachment(
     c: &mut Creature,
     _cfg: &Config,
@@ -237,10 +242,10 @@ pub(crate) fn spread_leg_attachment(
         return false;
     }
     let centre = c.nodes.iter().map(|n| n.x).sum::<f32>() / c.nodes.len() as f32;
-    let side = |n: usize| (c.nodes[n].x - centre).abs();
+    let off_centre = |n: usize| (c.nodes[n].x - centre).abs();
     let inside = branch_nodes(c, limb);
     let Some(at) = (1..c.nodes.len())
-        .filter(|&n| n != from && !inside.contains(&n) && side(n) > side(from) + 0.04)
+        .filter(|&n| n != from && !inside.contains(&n) && off_centre(n) > off_centre(from) + 0.04)
         .min_by(|&p, &q| {
             let d = |n: usize| {
                 (c.nodes[n].x - c.nodes[from].x).abs() + (c.nodes[n].y - c.nodes[from].y).abs()
