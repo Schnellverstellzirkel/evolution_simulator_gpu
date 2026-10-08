@@ -1,17 +1,13 @@
 //! Idea operators that take one group of genes from a second elite, the
-//! donor. Each moves a single kind of gene (surfaces, joint ranges, tendons,
-//! organs, strokes, duty, leg lengths, tempo) and leaves the rest of the
-//! body alone, so a child is a crossover at the level of a gene group
-//! rather than of a whole limb.
+//! donor, and leave the rest of the body alone: muscle timing, node surfaces,
+//! joint ranges, tendons, organs, stroke ratios, duty cycles, leg lengths or
+//! tempo. Each is a crossover at the level of a gene group (`graft_donor_limb`
+//! crosses whole limbs), and parts are matched by index up to the shorter body.
 //!
-//! Every operator is a whole change on its own, so its child gets no
-//! parameter noise, and the operators of this file share one pick slot. They
-//! need a donor and do nothing without one. Genes are matched by index (the
-//! n-th node with the n-th node, the n-th muscle with the n-th muscle), up to
-//! the shorter body.
-//!
+//! None does anything without a donor, every one is a whole change that gets
+//! no parameter noise, and the operators of this file share one pick slot.
 //! The sources are Vassiliades and Mouret (2018, a step along the line
-//! between two elites finds good variants far faster than isotropic noise,
+//! between two elites finds good variants faster than isotropic noise,
 //! Iso+LineDD), Hutchinson et al. (2026, discrete crossover of genes between
 //! elites), Lessin, Fussell and Miikkulainen (2013, exchange of whole modules)
 //! and Cully and Demiris (2017, behavioural diversity from recombination).
@@ -37,8 +33,9 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 ];
 
 /// A step along the line from this body to the donor's, as a share of the
-/// distance: usually between the two, sometimes past this body away from the
-/// donor.
+/// distance. Four times in five it is 0.25 to 0.9, between the two bodies.
+/// Otherwise it is a step of 0.1 to 0.3 the other way, past this body and away
+/// from the donor.
 fn step(rng: &mut Rng) -> f32 {
     if rng.unit() < 0.8 {
         rng.range(0.25, 0.9)
@@ -47,9 +44,10 @@ fn step(rng: &mut Rng) -> f32 {
     }
 }
 
-/// Timing genes (phase, period, duty, stiffness) of each muscle move along the
-/// line to the donor's muscle at the same index, by one common step
-/// (Vassiliades and Mouret 2018).
+/// The rhythm genes of each muscle (phase, period, duty, stiffness) move along
+/// the line to the donor's muscle at the same index, all by one `step`
+/// (Vassiliades and Mouret 2018). The phase takes the short way round the
+/// cycle.
 fn isoline_timing_step(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let n = c.muscles.len().min(d.muscles.len());
@@ -72,7 +70,7 @@ fn isoline_timing_step(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Cont
     changed
 }
 
-/// Node sizes and grips take half of the way to the donor's.
+/// Node sizes and grips move halfway to the donor's, except the head's.
 fn donor_surfaces(c: &mut Creature, cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let n = c.nodes.len().min(d.nodes.len());
@@ -94,7 +92,7 @@ fn donor_surfaces(c: &mut Creature, cfg: &Config, _rng: &mut Rng, cx: &Context) 
     changed
 }
 
-/// Joint ranges take half of the way to the donor's, bone by bone.
+/// Joint ranges move halfway to the donor's, bone by bone.
 fn donor_ranges(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let n = c.bones.len().min(d.bones.len());
@@ -120,7 +118,8 @@ fn donor_tendons(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) 
     changed
 }
 
-/// Organs take the donor's masses and places, bone by bone.
+/// Organs take the donor's masses and places, bone by bone. A bone where the
+/// donor has no organ loses its own.
 fn donor_organs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let n = c.bones.len().min(d.bones.len());
@@ -138,8 +137,8 @@ fn donor_organs(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -
     changed
 }
 
-/// The ratio of each muscle's short stroke to its long stroke becomes the
-/// donor's, with the muscle's own long stroke kept.
+/// The ratio of each muscle's `short` to its `long` becomes the donor muscle's,
+/// kept between 0.1 and 0.95, and the muscle keeps its own `long`.
 fn donor_stroke_ratio(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let n = c.muscles.len().min(d.muscles.len());
@@ -167,9 +166,10 @@ fn donor_duty_profile(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, cx: &Cont
     changed
 }
 
-/// Each leg's total length moves to within 30% of the leg's length at the same
-/// place in the donor's leg order (legs ordered from the first to the last
-/// bone index), all bones of the leg scaling together.
+/// Each leg's total length moves toward the length of the leg at the same place
+/// in the donor's leg order, by one random share (0.4 to 1.0) of the distance
+/// and by at most 30% either way. All bones of a leg scale together. Legs are
+/// listed by the index of their foot node.
 fn donor_leg_lengths(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let (mine, theirs) = (leaf_limbs(c), leaf_limbs(d));
@@ -194,8 +194,9 @@ fn donor_leg_lengths(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Contex
     changed
 }
 
-/// The mean period of the body moves to the donor's, every period scaled by
-/// the same factor so the ratios among clocks stay.
+/// The mean period of the body moves to the donor's, all the way or halfway by
+/// a coin flip, by a factor of 0.7 to 1.4 at most. Every period is scaled by
+/// the same factor, so the ratios among clocks stay.
 fn donor_tempo(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     if c.muscles.is_empty() || d.muscles.is_empty() {

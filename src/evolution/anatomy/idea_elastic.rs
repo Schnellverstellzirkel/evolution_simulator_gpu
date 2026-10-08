@@ -1,17 +1,17 @@
 //! Idea operators for springs, strokes and muscle strength: tendons, lever
-//! arms, the stroke a muscle can use well, and how a body spends its
-//! strength.
+//! arms, the stroke a muscle can use well, how a body spends its strength,
+//! and the period of a leg that swings like a pendulum.
 //!
 //! Every operator is a whole change on its own, so its child gets no
 //! parameter noise, and the operators of this file share one pick slot.
 //!
-//! The sources are Hill (1938, a muscle does the most work shortening at about
-//! a third of its top speed), Alexander (1976, the swing time of a leg is that
-//! of a pendulum of its length, and 1988, tendons return the energy of a
-//! stride), Blickhan (1989) and Full and Koditschek (1999, a running body
-//! behaves like a mass on a spring leg), Mochon and McMahon (1980, a walking
-//! leg swings as a pendulum) and Pratt and Williamson (1995, a spring in
-//! series with an actuator).
+//! The sources are Hill (1938, a muscle gives its peak power shortening at
+//! about a third of its top speed), Alexander (1976, the swing time of a leg
+//! is that of a pendulum of its length, and 1988, tendons return the energy
+//! of a stride), Blickhan (1989) and Full and Koditschek (1999, a running
+//! body behaves like a mass on a spring leg), Mochon and McMahon (1980, a
+//! walking leg swings as a pendulum) and Pratt and Williamson (1995, a spring
+//! in series with an actuator).
 use super::ideas::{by_drive, coin, drive, set, some_leg};
 use super::limbs::pick;
 use super::muscles::shared_node;
@@ -41,10 +41,11 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("tendon_tide", tendon_tide),
 ];
 
-/// A leg becomes a spring-mass leg (Blickhan 1989, Full and Koditschek
-/// 1999): every muscle of it gets a stiff tendon and a longer stroke, a little
-/// less drive, and the one period that is the mean of the leg's, so the
-/// spring and the muscles keep time together.
+/// A leg becomes a spring-mass leg (Blickhan 1989, Full and Koditschek 1999).
+/// Every muscle on it gets a stiff tendon (0.75 to 1.0), a `long` 15% longer
+/// (capped at the longest muscle length) and 30% less stiffness. They all take
+/// one period, the mean of the leg's muscles, so the spring and the muscles
+/// keep time together.
 fn slip_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
@@ -65,10 +66,12 @@ fn slip_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bo
     changed
 }
 
-/// Sets the stroke of the muscles of a leg (or of the trunk's, or of all) so
-/// they shorten at about 0.3 of their top speed of 8 lengths a second, where
-/// a muscle does the most work (Hill 1938). The shortening speed is the stroke
-/// over the time the muscle is on.
+/// Sets the stroke of the muscles of one leg, or of all muscles, so they
+/// shorten at about 0.3 of their top speed of 8 lengths a second, where a
+/// muscle gives its peak power (Hill 1938). The shortening speed is the stroke
+/// over the time the muscle is on. The new stroke is 5% to 75% of `long`. A
+/// coin flip picks the leg or all muscles, and all muscles are taken when no
+/// leg has a muscle on it.
 fn hill_power_stroke(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let ids = match some_leg(c, rng, 1, true) {
         Some(leg) if coin(rng) => muscles_on(c, &leg, false),
@@ -85,9 +88,11 @@ fn hill_power_stroke(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     changed
 }
 
-/// Every period of the body is scaled by one factor so the leg that is
-/// longest swings at the time of a pendulum of its length, 2 pi sqrt(L / g)
-/// (Alexander 1976, Mochon and McMahon 1980). Ratios between clocks stay.
+/// Every period of the body is scaled by one factor so that the mean period
+/// becomes the swing time of a pendulum as long as the longest leg, 2 pi
+/// sqrt(L / g), or twice that (Alexander 1976, Mochon and McMahon 1980). The
+/// factor stays between 0.6 and 1.6, and the operator does nothing when it is
+/// within 3% of 1. Ratios between clocks stay.
 fn pendulum_period_retune(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.is_empty() {
         return false;
@@ -113,8 +118,9 @@ fn pendulum_period_retune(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &
     changed
 }
 
-/// A spring in series with each muscle of a leg (Pratt and Williamson 1995):
-/// a medium tendon and a little more drive to pay for the give.
+/// Each muscle on a leg gets a medium tendon (at least a random 0.4 to 0.6),
+/// like the spring of a series elastic actuator (Pratt and Williamson 1995),
+/// and 20% more stiffness to pay for the give.
 fn series_elastic_actuators(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
@@ -130,8 +136,8 @@ fn series_elastic_actuators(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
     changed
 }
 
-/// The third of the muscles with the longest span (the most stretch to
-/// store) get a tendon of at least 0.7.
+/// The third (rounded up) of the muscles with the longest span (the most
+/// stretch to store) get a tendon of at least 0.7.
 fn tendon_longest_muscles(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 3 {
         return false;
@@ -146,7 +152,8 @@ fn tendon_longest_muscles(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: 
     changed
 }
 
-/// One springy muscle loses its tendon and pulls 30% harder instead.
+/// One springy muscle (a tendon above 0.1) loses its tendon and pulls 30%
+/// harder instead.
 fn tendon_strip_one(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let springy: Vec<usize> = (0..c.muscles.len())
         .filter(|&m| c.muscles[m].tendon > 0.1)
@@ -176,8 +183,8 @@ fn stretch_reserve(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// The two strongest muscles give up a quarter of their stiffness and the two
-/// weakest take 30% more, so no one muscle carries the gait.
+/// The two strongest muscles (by `drive`) give up a quarter of their stiffness
+/// and the two weakest take 30% more, so no one muscle carries the gait.
 fn peak_shaving(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 4 {
         return false;
@@ -196,7 +203,9 @@ fn peak_shaving(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// A quarter of the stiffness of one leg's muscles moves to another leg's.
+/// The muscles of one leg lose a quarter of their stiffness and the muscles of
+/// another leg gain a quarter. Only legs with a muscle take part, and a muscle
+/// that works on both legs stays as it is.
 fn stiffness_budget_shift(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
     let driven: Vec<usize> = (0..legs.len())
@@ -234,7 +243,7 @@ fn stiffness_budget_shift(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &
     changed
 }
 
-/// The strongest muscle pulls 30% harder and the weakest 20% less.
+/// The strongest muscle (by `drive`) pulls 30% harder and the weakest 20% less.
 fn rich_get_richer(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.len() < 2 {
         return false;
@@ -265,9 +274,12 @@ fn tendon_reflex_pair(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Con
     changed
 }
 
-/// Moves both anchors of the muscles of a leg by `by` of the way toward the
-/// joint they act across (`toward`) or away from it, keeping each stroke in
-/// proportion to its new span.
+/// Moves each anchor of each muscle in `ids` the share `by` of the way to the
+/// end of its bone at the joint the muscle acts across (with `toward`) or to
+/// the other end (without it), and refits the stroke to the new span with its
+/// old proportions. A muscle whose bones share no node is skipped, and one
+/// whose anchors move by 0.001 or less is left as it was. Returns whether any
+/// muscle changed.
 fn move_anchors(c: &mut Creature, ids: &[usize], by: f32, toward: bool) -> bool {
     let mut changed = false;
     for &i in ids {
@@ -281,8 +293,8 @@ fn move_anchors(c: &mut Creature, ids: &[usize], by: f32, toward: bool) -> bool 
         };
         let (ta, tb) = (end(old.bone_a, joint), end(old.bone_b, joint));
         let mut m = old;
-        m.anchor_a = wrap_unit(old.anchor_a + by * (ta - old.anchor_a));
-        m.anchor_b = wrap_unit(old.anchor_b + by * (tb - old.anchor_b));
+        m.anchor_a = clamp_unit(old.anchor_a + by * (ta - old.anchor_a));
+        m.anchor_b = clamp_unit(old.anchor_b + by * (tb - old.anchor_b));
         fit_stroke(c, &mut m, Some(&old));
         if (m.anchor_a - old.anchor_a).abs() > 1.0e-3 || (m.anchor_b - old.anchor_b).abs() > 1.0e-3
         {
@@ -294,7 +306,7 @@ fn move_anchors(c: &mut Creature, ids: &[usize], by: f32, toward: bool) -> bool 
 }
 
 /// Clamps a position to the unit interval [0, 1].
-fn wrap_unit(v: f32) -> f32 {
+fn clamp_unit(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
@@ -308,8 +320,9 @@ fn gear_down(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
     move_anchors(c, &on, 0.4, true)
 }
 
-/// The muscles of a leg move their anchors 40% away from the joint they
-/// bend: a long lever arm, a strong and slow muscle.
+/// The muscles of a leg move their anchors 40% of the way toward the far end
+/// of their bones, away from the joint they bend: a long lever arm, a strong
+/// and slow muscle.
 fn gear_up(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
@@ -383,7 +396,7 @@ fn sprint_gait(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -
 }
 
 /// Every tendon gets 0.15 stiffer, or every tendon loses half of its
-/// stiffness. Elasticity as a property of the whole body.
+/// stiffness. The whole body gets more or less elastic at once.
 fn tendon_tide(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let up = coin(rng);
     let mut changed = false;
