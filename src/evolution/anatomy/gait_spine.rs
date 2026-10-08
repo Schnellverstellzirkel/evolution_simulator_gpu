@@ -217,12 +217,12 @@ fn split_bone(c: &mut Creature, j: usize, frac: f32, rng: &mut Rng) -> usize {
     new
 }
 
-/// Adds a muscle across a random spine joint that no driven muscle bends. The
-/// muscle is a copy of the strongest leg muscle with a gentle stroke around its
-/// own span (`hinge_muscle`), and it runs in phase with that muscle or half a
-/// cycle after it. A flexing back adds length to the stride of a galloping
-/// mammal, because the hind legs reach farther forward while the fore legs
-/// reach back (Hildebrand 1959).
+/// Picks a random spine joint and adds a muscle across it, unless a driven
+/// muscle already bends it. The muscle is a copy of the strongest leg muscle
+/// with a gentle stroke around its own span (`hinge_muscle`), and it runs in
+/// phase with that muscle or half a cycle after it. A flexing back adds length
+/// to the stride of a galloping mammal, because the hind legs reach farther
+/// forward while the fore legs reach back (Hildebrand 1959).
 pub(crate) fn spine_flex_muscle(
     c: &mut Creature,
     cfg: &Config,
@@ -507,9 +507,10 @@ pub(crate) fn tail_swing_against_legs(
 
 /// Gives the neck a muscle across its base joint, between the neck and a trunk
 /// bone that hangs from it, timed a quarter or half a cycle after the strongest
-/// leg muscle, so the head bobs with the stride. Horses and pigeons move the
-/// head in time with the stride, and a swinging head is a counterweight at the
-/// end of a long lever.
+/// leg muscle, so the head bobs with the stride. It does nothing if a driven
+/// muscle already bends that joint. Horses and pigeons move the head in time
+/// with the stride, and a swinging head is a counterweight at the end of a long
+/// lever.
 pub(crate) fn neck_bob_muscle(
     c: &mut Creature,
     cfg: &Config,
