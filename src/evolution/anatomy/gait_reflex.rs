@@ -1,11 +1,11 @@
 //! Gait operators that use the touchdown sensor of a muscle: its `sensor`
 //! picks one end of its two bones, and when that end lands the muscle jumps to
-//! cycle position `reset`. Following Cruse's walknet, they give the muscles of
-//! a leg a landing reflex, set leg phases and duty to match it, and add
-//! muscles that a landing fires: bridges to another leg or to the trunk, and a
-//! stiffener across the last joint of a leg. The sensed end is always the foot
-//! of a leg, and cycle position 0 is where a muscle starts to contract. The
-//! operators share one pick slot (`GAIT_FILES` in `mod.rs`) and are compound,
+//! cycle position `reset`. Here the sensed end is always the foot of a leg, and
+//! cycle position 0 is where a muscle starts to contract. Following Cruse's
+//! walknet, the operators give the muscles of a leg a landing reflex, set leg
+//! phases and duty to match it, and add muscles that a landing fires: bridges
+//! to another leg or to the trunk, and a stiffener across the last joint of a
+//! leg. They share one pick slot (`GAIT_FILES` in `mod.rs`) and are compound,
 //! so a child gets no parameter noise.
 use super::compound::strongest;
 use super::limbs::pick;
