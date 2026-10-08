@@ -35,28 +35,39 @@
 // HURDLES, QUAKE, MUD, WATER, ICE, WIND, AIR, BRAMBLES) and the physics
 // constants.
 
+// A step lasts `DT` seconds and a substep `H` seconds. `INV_H` is the number
+// of substeps per second.
 #define DT (1.0f / RATE)
 #define H (1.0f / (RATE * SUBSTEPS))
 #define INV_H (RATE * SUBSTEPS)
 #define PI_F 3.14159265359f
 #define TAU_F 6.28318530718f
+// Stands for no parent bone and no sensor node in the records.
 #define NONE 0xffffffffu
 // Steps per 1/60 s, the clock of the head shake measure.
 #define HEAD_SAMPLE ((unsigned)(RATE / 60.0f + 0.5f))
-// Words of a node record and a bone record, floats of a muscle record.
+// Words of a node record and of a bone record, and floats of a muscle record.
+// `kernel::NODE_WORDS`, `kernel::BONE_WORDS` and `kernel::MUSCLE_FIELDS` have
+// the same values.
 #define NODE_WORDS 6u
 #define BONE_WORDS 6u
 #define MUSCLE_WORDS 20u
 
-// One early rung's rule (rungs::Rung): stop when the chain of fused
-// multiply-adds of the weights and the six features, from zero, is below the
-// bias; `off` has bit b set when cadence band b is off.
+// One early rung's rule, with the layout of `rungs::Rung`. The creature stops
+// when the chain of fused multiply-adds of `w` and the six features, from zero,
+// is below `bias`. The features are the distance, the speed over the last half
+// second, the share of nodes that touched the ground, the head shake, the mean
+// muscle energy store and the rhythm period. Bit b of `off` is set when
+// cadence band b is off.
 struct RungParams {
     float w[6];
     float bias;
     unsigned off;
 };
-// Same layout as warp_kernel::Params.
+// The launch parameters, with the layout of `kernel::Params`. That struct says
+// what each field means. This kernel does not read `air` and `muscle_energy`
+// and reads `air_sub` and `inv_muscle_energy` in their place. Only a
+// recording kernel reads `stride`.
 struct Params {
     unsigned count;
     unsigned base;
@@ -86,7 +97,10 @@ struct Params {
     RungParams r1;
     RungParams r2;
 };
-// Same layout as creature_kernel::GpuResult.
+// The result of a trial, with the layout of `creature_kernel::GpuResult`. The
+// field docs there say what each field holds when the trial has ended. While
+// it runs, some fields count something else, and `run_step` rewrites them at
+// the end.
 struct Result {
     float fitness;
     float ground_contact;
@@ -110,10 +124,13 @@ struct Result {
 };
 
 __device__ __forceinline__ float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
+// `a` plus a whole number of turns, in [-PI_F, PI_F).
 __device__ __forceinline__ float wrapf(float a) { return a - TAU_F * floorf((a + PI_F) * (1.0f / TAU_F)); }
+// The part of `x` above its floor, in [0, 1) also for a negative `x`.
 __device__ __forceinline__ float fracf(float x) { return x - floorf(x); }
 
-// Half precision, as the rung trace carries values.
+// Half precision, as the rung trace carries values. `f2h` rounds a float to
+// the nearest half and gives its 16 bits. `h2f` turns such bits into a float.
 __device__ __forceinline__ unsigned f2h(float v) {
     unsigned short r;
     asm("cvt.rn.f16.f32 %0, %1;" : "=h"(r) : "f"(v));
@@ -125,8 +142,10 @@ __device__ __forceinline__ float h2f(unsigned h) {
     return r;
 }
 
-// A muscle's rhythm: 0 at its longest, 1 at its shortest. It rises over
-// `duty` of the cycle and falls over the rest.
+// A muscle's rhythm at time `t`: 0 at its longest, 1 at its shortest. It rises
+// over `duty` of the cycle and falls over the rest, each as half a cosine.
+// `phase` and `offset` shift the cycle, and a touchdown sets `offset`.
+// `inv_duty` is 1 / `duty` and `inv_complement` is 1 / (1 - `duty`).
 __device__ float rhythm(float t, float inv_period, float phase, float offset, float duty, float inv_duty, float inv_complement) {
     const float ph = fracf(t * inv_period + phase + offset);
     if (ph < duty) {
@@ -136,10 +155,16 @@ __device__ float rhythm(float t, float inv_period, float phase, float offset, fl
 }
 
 // Height and slope of the ground under x for a creature with terrain
-// amplitude `amp` and quake phase `qphase`.
+// amplitude `amp` and quake phase `qphase`. The bumps use the numbers of
+// `physics::TERRAIN_WAVES` as literals, and the pits and the hurdles follow
+// `physics::gaps` and `physics::hurdles`. A change to the ground here needs the
+// same change on the host.
 __device__ float2 ground(float x, float amp, float qphase, const Params& p) {
     float height = 0.0f, slope = 0.0f;
 #if TERRAIN
+    // Two trains of bumps with wavelengths 1.1 m and 0.43 m and weights 0.65
+    // and 0.35. Each bump is 16 u^2 (1 - u)^2 over one wavelength, and `qphase`
+    // shifts both trains.
     {
         const float t0 = x * (1.0f / 1.1f) + qphase;
         const float u0 = fracf(t0);
@@ -153,10 +178,13 @@ __device__ float2 ground(float x, float amp, float qphase, const Params& p) {
     }
 #endif
 #if SLOPE
+    // The ground rises by `p.slope` per meter.
     height += p.slope * x;
     slope += p.slope;
 #endif
 #if GAPS
+    // Pits `p.gaps` wide and `GAP_DEPTH` deep, with walls that are ramps of at
+    // most `GAP_RUN`. Their centers are 2 + 4 * `p.gaps` meters apart.
     {
         const float spacing = 2.0f + 4.0f * p.gaps;
         const float center = spacing * 0.5f;
@@ -173,6 +201,8 @@ __device__ float2 ground(float x, float amp, float qphase, const Params& p) {
     }
 #endif
 #if HURDLES
+    // Steps `p.hurdles` high every `HURDLE_SPACING` meters. Each has a flat
+    // top of `HURDLE_TOP` and ramps of `HURDLE_RUN`.
     {
         const float spacing = HURDLE_SPACING;
         const float center = spacing * 0.5f;
@@ -191,7 +221,8 @@ __device__ float2 ground(float x, float amp, float qphase, const Params& p) {
     return make_float2(height, slope);
 }
 
-// Ice patches: 1 on a patch, 0 between patches.
+// Ice at x: 1 on a patch, 0 between patches, with smooth edges. It is the
+// formula of `physics::ice`.
 __device__ float ice_at(float x) {
     const float w = fracf(x * ICE_INV);
     const float t = fabsf(w - 0.5f) * 2.0f;
