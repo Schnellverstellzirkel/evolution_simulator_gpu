@@ -1199,12 +1199,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned FULL = 0xffffffffu;
     const unsigned lane = threadIdx.x & 31u;
     const unsigned below = (1u << lane) - 1u;
+    // The creature of this lane: `b` holds its constants and `ln` its trial so
+    // far.
     Body b;
     Lane ln;
     ln.live = false;
     // The warp's claim: `win` holds creatures of one class that no lane has
     // taken yet, `chunk` creatures that it has claimed and not yet sorted into
     // classes. `mode` is the class of the window and of every running lane.
+    // Each range is of places in the wave, from `_cur` up to but not including
+    // `_end`.
     unsigned win_cur = 0u, win_end = 0u, chunk_cur = 0u, chunk_end = 0u;
     bool claimed_all = false;
     int mode = 0;
@@ -1214,6 +1218,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         // usable. In mode 1 only the first 16 are, because a creature there
         // also uses the columns of the other 16 lanes, for its odd nodes.
         unsigned usable = mode == 0 ? FULL : 0xffffu;
+        // `need` has the usable lanes that wait for a creature. `fresh` has the
+        // lanes that got one in this round, and `mine_at` is the place in the
+        // wave of the creature this lane got.
         unsigned need = ~__ballot_sync(FULL, ln.live) & usable;
         unsigned fresh = 0u;
         unsigned mine_at = 0u;
