@@ -509,6 +509,26 @@ const BIG_UNIT: usize = 8192;
 /// slots of the wild islands' small units stay small however many there are.
 const BIG_SLOTS: usize = 4;
 
+/// Block slots of the GPU that the kernel of a big unit leaves free. That
+/// kernel holds every slot it may for as long as it runs, a second or more,
+/// and a stream of the highest priority (a replay, a confirmation trial) gets
+/// the next slot that frees up, which comes when the wave ends. The slots that
+/// the big kernel leaves go to the small units, whose blocks exit within 0.2 s,
+/// so a high priority launch starts within that.
+const RESERVED_BLOCKS: usize = 2;
+
+/// The blocks of the grid for a wave of `count` creatures when `resident`
+/// blocks fit on the GPU at once: a block for every `kernel::BLOCK`
+/// creatures, and no more than `resident` less `RESERVED_BLOCKS`. A block
+/// takes creatures from the wave's counter until it is empty, so these are
+/// enough.
+fn wave_blocks(count: usize, resident: usize) -> usize {
+    count
+        .div_ceil(crate::kernel::BLOCK as usize)
+        .min(resident.saturating_sub(RESERVED_BLOCKS))
+        .max(1)
+}
+
 /// A standard slot as `pick_standard_slot` sees it.
 #[derive(Clone, Copy, Debug)]
 struct SlotView {
@@ -2188,10 +2208,10 @@ impl CudaEngine {
                 let mut params = crate::kernel::params(cfg, first, count, stride);
                 // A thread runs one creature at a time and takes the next
                 // from the wave's counter, so the resident blocks are enough.
-                let blocks = count
-                    .div_ceil(crate::kernel::BLOCK as usize)
-                    .min(blocks_per_sm as usize * self.multiprocessors as usize)
-                    .max(1);
+                let blocks = wave_blocks(
+                    count,
+                    blocks_per_sm as usize * self.multiprocessors as usize,
+                );
                 let mut pointers = [
                     res.bufs[0].ptr,
                     res.bufs[1].ptr,
@@ -2496,6 +2516,17 @@ mod tests {
         assert_eq!(pick_standard_slot(&short, 2, false), Some(3));
         // With fewer slots than big slots every slot is a big slot.
         assert_eq!(pick_standard_slot(&short[..1], 2, false), Some(0));
+    }
+
+    /// A big wave leaves the reserved block slots free, and a small one takes
+    /// a block for every 128 creatures.
+    #[test]
+    fn a_big_wave_leaves_block_slots_free() {
+        assert_eq!(wave_blocks(1, 48), 1);
+        assert_eq!(wave_blocks(250, 48), 2);
+        assert_eq!(wave_blocks(5_000, 48), 40);
+        assert_eq!(wave_blocks(100_000, 48), 48 - RESERVED_BLOCKS);
+        assert_eq!(wave_blocks(100_000, 1), 1);
     }
 
     /// The engine asks for 32 queues when the environment has no count, and a
