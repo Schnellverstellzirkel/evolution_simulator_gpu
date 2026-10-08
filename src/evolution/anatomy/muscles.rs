@@ -1,4 +1,10 @@
-//! Operators that add, move, split, fuse and retime muscles.
+//! This file holds the ten muscle operators of `BASE_OPERATORS` in `mod.rs`.
+//! They add a muscle across two joints, move, split, fuse, swap and relay
+//! muscles, add an antagonist, fan out clustered anchors, copy a limb's muscle
+//! pattern onto another limb and quiet a branch. Each has a pick slot of its
+//! own. The muscle helpers that other operator files use are here too:
+//! `torque`, `flipped`, `turn`, `shift_timing`, `shift_phase`, `ring`,
+//! `shared_node` and `actuation`.
 use super::{
     BoneIds, Context, MuscleIds, branch, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones,
     pick_each, room,
@@ -452,11 +458,13 @@ pub(crate) fn quiet_muscle_group(
     true
 }
 
-/// Least torque (lever times pull, in m^2) that counts as turning a bone.
+/// Least `torque` that counts as turning a bone: the lever arm times the
+/// muscle's span, in m^2.
 const MIN_TORQUE: f32 = 1.0e-3;
 
-/// The torque a muscle's pull puts on its `bone_a` about that bone's parent
-/// node, in the pose. Positive turns it counterclockwise.
+/// The torque the pull of muscle `m` puts on its `bone_a` about that bone's
+/// parent node, in the pose: the lever arm times the muscle's span, in m^2.
+/// Positive turns the bone counterclockwise.
 pub(super) fn torque(c: &Creature, m: &Muscle) -> f32 {
     let bone = c.bones[m.bone_a as usize];
     let joint = c.nodes[bone.a as usize];
@@ -465,7 +473,8 @@ pub(super) fn torque(c: &Creature, m: &Muscle) -> f32 {
     (p[0] - joint.x) * (q[1] - p[1]) - (p[1] - joint.y) * (q[0] - p[0])
 }
 
-/// The same muscle with its ends swapped.
+/// The same muscle with its ends swapped. Its touchdown sensor stays on the
+/// same endpoint.
 pub(super) fn flipped(m: &Muscle) -> Muscle {
     Muscle {
         bone_a: m.bone_b,
@@ -499,9 +508,9 @@ pub(super) fn shift_phase(c: &mut Creature, m: usize, by: f32) {
     c.muscles[m].phase = (c.muscles[m].phase + by).rem_euclid(1.0);
 }
 
-/// Whether a muscle joins consecutively numbered bones. `repair` keeps
-/// a muscle on each such pair, so rerouting one would only make repair add a
-/// random muscle in its place.
+/// Whether a muscle is on the muscle ring, which joins each bone to the next
+/// one (the last bone to bone 0). `repair` keeps a muscle on each such pair, so
+/// rerouting one would only make `repair` add a random muscle in its place.
 pub(super) fn ring(c: &Creature, m: &Muscle) -> bool {
     let n = c.bones.len();
     let (x, y) = (m.bone_a as usize, m.bone_b as usize);
