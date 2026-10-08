@@ -326,18 +326,22 @@ pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     true
 }
 
+/// The position of node `node` in the starting pose, as `[x, y]`.
 pub(super) fn pos(c: &Creature, node: usize) -> [f32; 2] {
     [c.nodes[node].x, c.nodes[node].y]
 }
 
+/// The sum `p + q` of two 2D vectors.
 pub(super) fn add(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
     [p[0] + q[0], p[1] + q[1]]
 }
 
+/// The difference `p - q` of two 2D vectors.
 pub(super) fn sub(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
     [p[0] - q[0], p[1] - q[1]]
 }
 
+/// The 2D vector `p` times the number `s`.
 pub(super) fn scale(p: [f32; 2], s: f32) -> [f32; 2] {
     [p[0] * s, p[1] * s]
 }
@@ -352,7 +356,8 @@ fn unit(v: [f32; 2]) -> [f32; 2] {
     }
 }
 
-/// Adds a node at `at` with the size and grip of node `like`.
+/// Adds a node at `at` with the size and grip of node `like`. Returns its
+/// index.
 pub(super) fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
     c.nodes.push(NodeGene {
         x: at[0],
@@ -362,8 +367,9 @@ pub(super) fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
     c.nodes.len() - 1
 }
 
-/// Adds a bone from node `a` to node `b`, as long as they are apart in the
-/// pose, with a narrow joint range. Returns its index.
+/// Adds a bone from node `a` to node `b` with a narrow joint range, 0.1 to 0.4
+/// rad to each side. Its rest length is the distance between the two nodes in
+/// the pose. Returns its index.
 fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize {
     let [dx, dy] = sub(pos(c, b), pos(c, a));
     c.bones.push(Bone {
@@ -389,6 +395,8 @@ pub(super) fn spans(c: &Creature) -> Bounded<f32, MAX_MUSCLES> {
 
 /// Scales the stroke of each muscle that existed when `before` was taken by
 /// how much its span changed since, so it pulls as it did in the old pose.
+/// Muscles are matched by index, so call this before any change that removes
+/// muscles. Muscles added since `before` stay as they are.
 pub(super) fn keep_strokes(c: &mut Creature, before: &[f32]) {
     let after = spans(c);
     for ((m, old), new) in c.muscles.iter_mut().zip(before).zip(after) {
@@ -398,7 +406,8 @@ pub(super) fn keep_strokes(c: &mut Creature, before: &[f32]) {
     }
 }
 
-/// Raises the whole body if a node would lie below the ground.
+/// Raises the whole body so that no node lies below the ground (y = 0). A body
+/// that is already above the ground does not move.
 pub(super) fn lift(c: &mut Creature) {
     let low = c.nodes.iter().map(|n| n.y).fold(0.0, f32::min);
     for n in &mut c.nodes {
@@ -406,8 +415,9 @@ pub(super) fn lift(c: &mut Creature) {
     }
 }
 
-/// Turns bone `j`'s branch about its pivot by `angle` (counterclockwise),
-/// lifting the body if a node would go below the ground.
+/// Turns the branch of bone `j` counterclockwise by `angle` radians about the
+/// bone's parent node. If a node then lies below the ground, the whole body is
+/// raised as in `lift`.
 pub(super) fn turn_branch(c: &mut Creature, j: usize, angle: f32) {
     let pivot = c.nodes[c.bones[j].a as usize];
     let (sin, cos) = angle.sin_cos();
@@ -422,8 +432,10 @@ pub(super) fn turn_branch(c: &mut Creature, j: usize, angle: f32) {
     }
 }
 
-/// A joint (not the neck) and one of its stops, the stop as an angle from
-/// the starting pose.
+/// A random joint and one of its stops. A joint is a bone other than the neck
+/// with a range wider than 0.05 rad. A stop is an end of that range
+/// (`min_angle` or `max_angle`), an angle from the starting pose. It is `None`
+/// when no bone qualifies.
 fn joint_and_stop(c: &Creature, rng: &mut Rng) -> Option<(usize, f32)> {
     let joints: BoneIds = (0..c.bones.len())
         .filter(|&j| !is_neck(c, j) && c.bones[j].max_angle - c.bones[j].min_angle > 0.05)
@@ -440,10 +452,11 @@ fn joint_and_stop(c: &Creature, rng: &mut Rng) -> Option<(usize, f32)> {
     ))
 }
 
-/// Starts a joint near one of its stops and measures its range from there, so
-/// the stops stay where they were and only the starting pose changes. The
-/// best elites of a 120-generation save ran with their joints 0.3 to 0.6 rad
-/// from the pose their genome starts in, so every trial began by folding.
+/// Starts a joint between half way and all the way to one of its stops, and
+/// measures its range from there, so the stops stay where they were and only
+/// the starting pose changes. The best elites of a 120-generation save ran with
+/// their joints 0.3 to 0.7 rad from the pose their genome starts in, so every
+/// trial began by folding.
 pub(crate) fn pose_joint_at_stop(
     c: &mut Creature,
     _cfg: &Config,
@@ -463,8 +476,8 @@ pub(crate) fn pose_joint_at_stop(
 /// Sets a joint against one of its stops and leaves it only a small flex back
 /// from it, so the skeleton holds a braced shape by itself. The best elites of
 /// a 120-generation save held 40 to 80% of their joints against a stop with
-/// muscles (as much steady force as oscillating force) and hopped as one
-/// rigid frame; mid-ranked elites held 8 to 18% and slid.
+/// muscles, with as much steady force as oscillating force, and hopped as one
+/// rigid frame. Mid-ranked elites held 8 to 18% and slid.
 pub(crate) fn brace_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some((j, stop)) = joint_and_stop(c, rng) else {
         return false;
@@ -575,8 +588,9 @@ mod tests {
                 (trunk.min_angle, trunk.max_angle)
             );
             assert!(!child_bones(c)[copy.b as usize].is_empty());
-            // copy_branch keeps copied nodes above the ground line, so only
-            // the old bones (some moved below the copy) and the copy must fit.
+            // `copy_branch` keeps copied nodes above the ground line, so only
+            // the old bones (some now hang from the copy) and the copy must
+            // fit.
             assert!(c.bones[..=before.bones.len()].iter().all(|b| fits(c, b)));
         });
         eprintln!("repeat_body_segment: {applied} of 160");
