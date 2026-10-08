@@ -112,16 +112,16 @@ impl App {
         self.race_pending = false;
         self.race_camera = 0.0;
     }
-    /// Empties the race and marks it as waiting for creatures. With no picks
-    /// it asks for the ranked archive, so the top five can run again. With
-    /// picks, `maybe_build_race` builds the lanes from them.
+    /// Empties the race and marks it as waiting for creatures. It asks the
+    /// worker for the ranked archive. A paused game publishes a snapshot only
+    /// when something changes, and the request is a change. With no picks, the
+    /// list builds the top five (`build_top_race`). With picks,
+    /// `maybe_build_race` builds the lanes from them when the snapshot arrives.
     pub(super) fn restart_race(&mut self) {
         self.race.clear();
         self.race_pending = true;
         self.race_camera = 0.0;
-        if self.race_picks.is_empty() {
-            self.request_cards();
-        }
+        self.request_cards();
     }
     /// The Race tab: the title row and the controls, then the lanes on the left
     /// and the standings board on the right. The lanes share one zoom and one
@@ -356,13 +356,17 @@ impl App {
             );
             // Only the first lane carries the meter labels.
             if i == 0 {
+                // `ceil` makes the first tick -0.0 when the camera is less than
+                // one step left of the start line, and -0.0 prints as "-0 m".
+                // The start line reads 0 m.
+                let shown = if x == 0.0 { 0.0 } else { x };
                 lane_painter.text(
                     Pos2::new(px + 3., ground - 2.),
                     Align2::LEFT_BOTTOM,
                     if step < 1.0 {
-                        format!("{x:.1} m")
+                        format!("{shown:.1} m")
                     } else {
-                        format!("{x:.0} m")
+                        format!("{shown:.0} m")
                     },
                     FontId::proportional(14.5),
                     GROUND_INK,
