@@ -642,8 +642,11 @@ impl<T: bytemuck::Pod> Default for HostVec<T> {
 
 impl<T: bytemuck::Pod> HostVec<T> {
     /// Below this many bytes a buffer is not registered: the driver's own
-    /// staging copies it about as fast.
-    const REGISTER_FROM: usize = 1 << 16;
+    /// staging copies it about as fast. Registering and unregistering wait
+    /// for all the work on the GPU (0.13 to 2.2 s), and the small units of
+    /// the wild islands grew their registered buffers 30 times in 2
+    /// generations at 3M, with the engine thread stuck each time.
+    const REGISTER_FROM: usize = 1 << 20;
 
     /// An empty vector that has mapped nothing yet.
     pub const fn new() -> Self {
