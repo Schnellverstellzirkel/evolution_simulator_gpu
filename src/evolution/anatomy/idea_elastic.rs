@@ -293,8 +293,8 @@ fn move_anchors(c: &mut Creature, ids: &[usize], by: f32, toward: bool) -> bool 
         };
         let (ta, tb) = (end(old.bone_a, joint), end(old.bone_b, joint));
         let mut m = old;
-        m.anchor_a = wrap_unit(old.anchor_a + by * (ta - old.anchor_a));
-        m.anchor_b = wrap_unit(old.anchor_b + by * (tb - old.anchor_b));
+        m.anchor_a = clamp_unit(old.anchor_a + by * (ta - old.anchor_a));
+        m.anchor_b = clamp_unit(old.anchor_b + by * (tb - old.anchor_b));
         fit_stroke(c, &mut m, Some(&old));
         if (m.anchor_a - old.anchor_a).abs() > 1.0e-3 || (m.anchor_b - old.anchor_b).abs() > 1.0e-3
         {
@@ -306,7 +306,7 @@ fn move_anchors(c: &mut Creature, ids: &[usize], by: f32, toward: bool) -> bool 
 }
 
 /// Clamps a position to the unit interval [0, 1].
-fn wrap_unit(v: f32) -> f32 {
+fn clamp_unit(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
