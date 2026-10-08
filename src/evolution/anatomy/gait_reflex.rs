@@ -34,7 +34,8 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 ];
 
 /// The legs, from the rearmost foot to the foremost: the leaf limbs of two
-/// bones or more, ordered by the x of the foot in the starting pose.
+/// bones or more, ordered by the x of the foot in the starting pose. A leg
+/// lists its bones from the top bone, at the hip, to the foot bone.
 fn legs_by_x(c: &Creature) -> Limbs {
     let mut legs: Limbs = leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect();
     legs.sort_stable_by(|p, q| tip_x(c, p).total_cmp(&tip_x(c, q)));
@@ -332,11 +333,12 @@ fn alternate_legs_with_reflex(
     changed
 }
 
-/// The legs split into a rear group and a front group. Legs of one group
-/// step together and the groups are a half, a quarter or three quarters of a
-/// cycle apart, each leg with a landing reflex. It is a bound (half) or a
-/// gallop (quarter) as in galloping horses, where fore pair and hind pair
-/// each act as one.
+/// The legs split into a rear group (the rearmost half, rounded down) and a
+/// front group. Each leg's strongest muscle is put on its group's phase, so the
+/// legs of one group step together. The groups are a half, a quarter or three
+/// quarters of a cycle apart, and each leg gets a landing reflex. It is a bound
+/// (half) or a gallop (quarter) as in galloping horses, where fore pair and
+/// hind pair each act as one.
 fn fore_hind_pairing(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     if legs.len() < 2 {
@@ -356,10 +358,12 @@ fn fore_hind_pairing(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     changed
 }
 
-/// A leg's landing fires a small muscle between its foot bone and the nearest
-/// bone of the trunk, which flexes the spine at each footfall. The impact
-/// then carries into the back, the way the spine of a galloping cheetah
-/// gathers and extends with each stride.
+/// Adds a bridge muscle from the foot bone of a random leg to the trunk bone
+/// whose middle is nearest that foot along x. A trunk bone is any bone that is
+/// in none of the legs and is not the neck. The leg's landing fires the
+/// muscle, which flexes the spine at each footfall. The impact then carries
+/// into the back, the way the spine of a galloping cheetah gathers and extends
+/// with each stride.
 fn landing_flexes_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     let mut in_leg = [false; crate::evolution::MAX_NODES];
@@ -387,11 +391,12 @@ fn landing_flexes_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     bridge(c, cfg, &leg, bone, rng)
 }
 
-/// A second muscle across the last joint of a leg (foot bone to the bone
-/// above) has a spring tendon, a long contraction and a landing reflex. It
-/// extends the leg through stance and stores the landing in its tendon, the
-/// way a limb stiffens when it takes load (Full and Koditschek's spring-loaded
-/// leg template).
+/// Adds an extra muscle across the last joint of a random leg, from the foot
+/// bone to the bone above it. It has a spring tendon (0.4 to 0.8), a long
+/// contraction (duty 0.5 to 0.7), 1.3 times the stiffness of the leg's
+/// strongest muscle and a landing reflex. It is meant to stiffen the leg
+/// through stance and store the landing in its tendon, the way a limb stiffens
+/// when it takes load (Full and Koditschek's spring-loaded leg template).
 fn touchdown_stiffener(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = pick(&legs_by_x(c), rng) else {
         return false;
@@ -417,10 +422,13 @@ fn touchdown_stiffener(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Cont
     true
 }
 
-/// A leg that already has a landing reflex passes its rule to every leg that
-/// has none. Each target muscle restarts at the same distance from its own
-/// phase as the source muscle does, so all legs follow one rule (Cruse's
-/// walknet uses one rule set for every leg) while keeping their own timing.
+/// A random leg that already has a landing reflex passes its rule to every leg
+/// that has none. A leg has a reflex when one of its muscles that can sense its
+/// foot has a sensor. In each leg without one, the muscles that can sense the
+/// foot take the source leg's reflex muscles as models, in turn. Each senses
+/// its own foot and restarts at the same distance from its own phase as its
+/// model does. So all legs follow one rule (Cruse's walknet uses one rule set
+/// for every leg) while keeping their own timing.
 fn spread_leg_reflex(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = sensing_legs(c);
     let armed = |c: &Creature, l: &BoneIds| {
@@ -454,11 +462,11 @@ fn spread_leg_reflex(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     changed
 }
 
-/// The legs from the front back are linked in a chain: each leg's landing
-/// fires a bridge muscle on the next leg back, and each is put half a cycle
-/// after the one before it (up to three links). A step then runs down the
-/// body as one reflex chain, as in walking insects, where each leg's
-/// placement cues the leg behind it.
+/// The legs from the front back are linked in a chain of up to three links.
+/// Each link puts a leg half a cycle from the leg in front of it and adds a
+/// bridge muscle, so the landing of the front leg fires the leg behind it. A
+/// step then runs down the body as one reflex chain, as in walking insects,
+/// where each leg's placement cues the leg behind it.
 fn trigger_chain_along_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_by_x(c);
     if legs.len() < 2 {
@@ -476,11 +484,13 @@ fn trigger_chain_along_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
     changed
 }
 
-/// A leg is set to a walking duty factor (0.6 to 0.75, long stance with
-/// overlap between legs) or a running one (0.3 to 0.4, short stance), keeping
-/// the middle of each contraction, and gets a landing reflex that starts the
-/// stroke. Alexander's duty factor separates walking from running, and the
-/// reflex keeps the stance beginning at touchdown whatever the duty.
+/// A random leg whose foot a muscle can sense is set to a walking duty factor
+/// (0.6 to 0.75, long stance with overlap between legs) or a running one (0.3
+/// to 0.4, short stance). Every active muscle on the leg takes that duty and
+/// keeps the middle of its contraction where it was in time. The leg also gets
+/// a landing reflex that starts the stroke. Alexander's duty factor separates
+/// walking from running, and the reflex keeps the stance beginning at
+/// touchdown whatever the duty.
 fn stance_duty_with_reflex(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = pick(&sensing_legs(c), rng) else {
         return false;
