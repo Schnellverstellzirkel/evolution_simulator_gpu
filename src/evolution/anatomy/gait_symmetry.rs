@@ -111,8 +111,8 @@ struct Job {
 /// then closes the motor ring. The copies are added before the old legs go. A
 /// job the body has no room for ends the list, so it and the jobs after it are
 /// dropped. The body stays as it was if no job fits, if it would grow by more
-/// than two nodes, or if the ring does not close. Returns whether the creature
-/// changed.
+/// than two nodes, or if `close_ring` finds the skeleton invalid. Returns
+/// whether the creature changed.
 fn replant(c: &mut Creature, cfg: &Config, jobs: &[Job], rng: &mut Rng) -> bool {
     let mut next = c.clone();
     let mut gone_bones = BoneIds::new();
@@ -364,7 +364,7 @@ fn repeat_segment(
 /// repeats it once on a copy of the body (`repeat_segment`). Then it sheds idle
 /// tips (`shed_tips`) so that the body ends at most one node bigger, and closes
 /// the motor ring. The body stays as it was if the repeat does not fit, too few
-/// tips can go, or the ring does not close.
+/// tips can go, or `close_ring` finds the skeleton invalid.
 fn repeat_one(c: &mut Creature, cfg: &Config, rng: &mut Rng, phase: f32, mirror: bool) -> bool {
     let children = child_bones(c);
     let trunks: BoneIds = (0..c.bones.len())
