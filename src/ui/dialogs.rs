@@ -14,7 +14,7 @@ use super::{
 use crate::{
     config::Config,
     evolution::Creature,
-    worker::{Command, EventKind, Snapshot},
+    worker::{Command, Event, EventKind, Snapshot},
 };
 use eframe::egui::{self, Align2, RichText, Vec2};
 use std::{path::PathBuf, time::Instant};
@@ -66,12 +66,19 @@ impl App {
     /// an error from the worker, because a save that fails logs no event.
     pub(super) fn absorb_events(&mut self, snapshot: &Snapshot) {
         // A new game or a load starts a new log, which is read from its start.
-        // The worker keeps only its newest 200 events, so once the log is full
-        // its length stops growing and the events after that are not seen.
-        if self.events_seen.0 != snapshot.epoch || snapshot.events.len() < self.events_seen.1 {
-            self.events_seen = (snapshot.epoch, 0);
-        }
-        for event in &snapshot.events[self.events_seen.1..] {
+        let fresh =
+            self.events_seen.0 != snapshot.epoch || snapshot.events.len() < self.events_seen.1;
+        // The worker keeps only its newest 200 events. Once the log is full,
+        // each new event drops the oldest one and the length of the log stops
+        // growing. So the new events are found against the log read last,
+        // which `self.snapshot` still holds until `absorb_snapshot` replaces
+        // it.
+        let read_last: &[Event] = match &self.snapshot {
+            Some(last) if !fresh => last.events.as_slice(),
+            _ => &[],
+        };
+        let new = new_events(read_last, &snapshot.events);
+        for event in &snapshot.events[snapshot.events.len() - new..] {
             match event.kind {
                 EventKind::Saved | EventKind::Opened => {
                     self.saved = Some((
@@ -87,7 +94,7 @@ impl App {
                 _ => {}
             }
         }
-        self.events_seen.1 = snapshot.events.len();
+        self.events_seen = (snapshot.epoch, snapshot.events.len());
         if snapshot.error.is_some() {
             self.saving = None;
         }
@@ -399,6 +406,23 @@ impl App {
         }
     }
 }
+/// How many events at the end of the log `now` are new, when `before` is the
+/// log that was read last. The worker keeps only its newest events, so once
+/// its log is full each new event drops the oldest one. The events that
+/// `before` still holds are then the start of `now`, and the events after them
+/// are new. Two events are the same when their generation, kind and text are.
+/// When the logs share no event, all of `now` is new.
+fn new_events(before: &[Event], now: &[Event]) -> usize {
+    let same =
+        |a: &Event, b: &Event| a.generation == b.generation && a.kind == b.kind && a.text == b.text;
+    for dropped in 0..before.len() {
+        let kept = &before[dropped..];
+        if kept.len() <= now.len() && kept.iter().zip(now).all(|(a, b)| same(a, b)) {
+            return now.len() - kept.len();
+        }
+    }
+    now.len()
+}
 /// Checks a creature read from a JSON file before it is replayed, and gives a
 /// short reason when it fails. The body must be a connected tree with one bone
 /// per extra node. The numbers of a node and a bone must be finite, and so must
@@ -482,5 +506,30 @@ mod tests {
         // A bone that ends on a node the body does not have is not a tree.
         loaded.bones[0].b = 9;
         assert!(imported_creature(&mut loaded).is_err());
+    }
+    #[test]
+    fn new_events_follow_a_log_that_slid() {
+        let event = |generation: u32, text: &str| Event {
+            generation,
+            kind: EventKind::Saved,
+            text: text.to_owned(),
+        };
+        let log = |from: u32, to: u32| -> Vec<Event> {
+            (from..to).map(|g| event(g, &format!("save {g}"))).collect()
+        };
+        // A log that is not full only grows.
+        assert_eq!(new_events(&log(0, 3), &log(0, 5)), 2);
+        assert_eq!(new_events(&log(0, 5), &log(0, 5)), 0);
+        assert_eq!(new_events(&[], &log(0, 4)), 4);
+        // A full log of 5 drops its oldest events as the new ones arrive.
+        assert_eq!(new_events(&log(0, 5), &log(1, 6)), 1);
+        assert_eq!(new_events(&log(2, 7), &log(5, 10)), 3);
+        // A log with no event of the last one is all new.
+        assert_eq!(new_events(&log(0, 5), &log(5, 10)), 5);
+        // Events that look alike are told apart by their place in the log.
+        let same = event(9, "same");
+        let before = vec![event(1, "a"), event(2, "b"), same.clone(), same.clone()];
+        let now = vec![event(2, "b"), same.clone(), same.clone(), same.clone()];
+        assert_eq!(new_events(&before, &now), 1);
     }
 }
